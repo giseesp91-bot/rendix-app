@@ -1,0 +1,1126 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1.0,maximum-scale=1.0,user-scalable=no"/>
+<meta name="theme-color" content="#080c14"/>
+<meta name="apple-mobile-web-app-capable" content="yes"/>
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent"/>
+<meta name="apple-mobile-web-app-title" content="Rendix"/>
+<title>Rendix</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Sora:wght@400;500;600;700;800&family=JetBrains+Mono:wght@500;700&display=swap" rel="stylesheet">
+<script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+<script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+<style>
+*{box-sizing:border-box;margin:0;padding:0;}
+html,body{background:#080c14;height:100%;}
+#root{max-width:430px;margin:0 auto;min-height:100vh;}
+input,button,textarea,select{font-family:inherit;}
+input[type=date]::-webkit-calendar-picker-indicator,
+input[type=time]::-webkit-calendar-picker-indicator{filter:invert(0.5);cursor:pointer;}
+::-webkit-scrollbar{width:0;height:0;}
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel">
+import { useState, useMemo, useEffect, useRef, useCallback } from "react";
+
+// ─── FERIADOS AR 2025-2026 ───────────────────────────────────────────────────
+const FERIADOS = new Set([
+  "2025-01-01","2025-03-03","2025-03-04","2025-03-24","2025-04-02","2025-04-18",
+  "2025-04-19","2025-05-01","2025-05-25","2025-06-20","2025-07-09","2025-08-17",
+  "2025-10-12","2025-11-20","2025-12-08","2025-12-25",
+  "2026-01-01","2026-02-16","2026-02-17","2026-03-24","2026-04-02","2026-04-03",
+  "2026-04-04","2026-05-01","2026-05-25","2026-06-20","2026-07-09","2026-08-17",
+  "2026-10-12","2026-11-20","2026-12-08","2026-12-25",
+]);
+
+const MONTHS = ["Enero","Febrero","Marzo","Abril","Mayo","Junio","Julio","Agosto","Septiembre","Octubre","Noviembre","Diciembre"];
+const DAYS_ES = ["Dom","Lun","Mar","Mié","Jue","Vie","Sáb"];
+const DAYS_FULL = ["Domingo","Lunes","Martes","Miércoles","Jueves","Viernes","Sábado"];
+const GASTO_CATS = ["Materiales","Herramientas","Transporte","Publicidad","Servicios","Alquiler","Impuestos","Otros"];
+const EMP_ICONS = {briefcase:"💼",ventana:"🪟",nails:"💅",costura:"🧵",cake:"🎂",clean:"🧹",hair:"💇",pet:"🐾",food:"🍽️",plant:"🌿",car:"🚗",tech:"💻"};
+const PALETTE = ["#f59e0b","#ef4444","#8b5cf6","#3b82f6","#10b981","#ec4899","#f97316","#06b6d4","#84cc16","#e11d48"];
+
+let _uid = Date.now();
+const uid = () => `r${_uid++}`;
+const fmtM = n => `$${Number(n||0).toLocaleString("es-AR",{minimumFractionDigits:0})}`;
+const fmtH = m => { if(!m) return "—"; const h=Math.floor(m/60),mm=m%60; return h>0?(mm>0?`${h}h ${mm}m`:`${h}h`):`${m}m`; };
+const fmtDt = d => parseLocalDate(d).toLocaleDateString("es-AR",{day:"2-digit",month:"2-digit"});
+const todayISO = new Date().toISOString().slice(0,10);
+const isoOf = d => d.toISOString().slice(0,10);
+const isHol = d => FERIADOS.has(d);
+// Parse date string as LOCAL time (not UTC) to avoid timezone day-shift bug
+const parseLocalDate = ds => { const [y,m,d]=ds.split("-").map(Number); return new Date(y,m-1,d); };
+const isWknd = d => { const w=parseLocalDate(d).getDay(); return w===0||w===6; };
+const pct = (a,b) => b===0?null:Math.round(((a-b)/b)*100);
+const arrowPct = p => p===null?"—":(p>0?`▲ ${p}%`:(p<0?`▼ ${Math.abs(p)}%`:"→ 0%"));
+const arrowClr = (p,inv=false) => p===null?"#64748b":(p>0?(inv?"#ef4444":"#22c55e"):(p<0?(inv?"#22c55e":"#ef4444"):"#94a3b8"));
+const hexRgb = h => { const r=parseInt(h.slice(1,3),16),g=parseInt(h.slice(3,5),16),b=parseInt(h.slice(5,7),16); return `${r},${g},${b}`; };
+
+const INIT_DATA = {
+  emprendimientos:[{id:"e1",nombre:"Mi Emprendimiento",color:"#f59e0b",icon:"briefcase",meta:0}],
+  ingresos:[], gastos:[], clientes:[], notas:{},
+  activeEmp:"e1", theme:"dark", onboarded:false, diaCorte:1,
+};
+
+// ─── CICLO PERSONALIZADO ─────────────────────────────────────────────────────
+// Si diaCorte=10: el "mes" va del 10 de un mes al 9 del siguiente.
+// Devuelve {desde, hasta} como strings ISO para un período dado.
+const getCiclo = (diaCorte, offset=0) => {
+  // offset=0 → ciclo actual, offset=-1 → anterior, etc.
+  const hoy = new Date();
+  const dc = diaCorte || 1;
+  // ¿Estamos antes o después del día de corte?
+  const thisMonthCut = new Date(hoy.getFullYear(), hoy.getMonth(), dc);
+  // inicio del ciclo actual
+  let inicioBase = hoy >= thisMonthCut
+    ? new Date(hoy.getFullYear(), hoy.getMonth(), dc)
+    : new Date(hoy.getFullYear(), hoy.getMonth()-1, dc);
+  // aplicar offset de ciclos
+  const inicio = new Date(inicioBase);
+  inicio.setMonth(inicio.getMonth() + offset);
+  const fin = new Date(inicio);
+  fin.setMonth(fin.getMonth()+1);
+  fin.setDate(fin.getDate()-1);
+  return { desde: isoOf(inicio), hasta: isoOf(fin), inicio, fin };
+};
+
+const labelCiclo = (ciclo) => {
+  const d = ciclo.inicio, h = ciclo.fin;
+  return `${d.getDate()}/${d.getMonth()+1} — ${h.getDate()}/${h.getMonth()+1}`;
+};
+
+
+// ── DONUT CHART ──────────────────────────────────────────────────────────────
+function DonutChart({segments,size=120,stroke=18}) {
+  const r=(size-stroke)/2,ci=2*Math.PI*r,tot=segments.reduce((s,g)=>s+g.value,0)||1;
+  let off=0;
+  return (
+    <svg width={size} height={size} style={{transform:"rotate(-90deg)"}}>
+      <circle cx={size/2} cy={size/2} r={r} fill="none" stroke="rgba(255,255,255,0.05)" strokeWidth={stroke}/>
+      {segments.map((sg,i)=>{
+        const dash=(sg.value/tot)*ci,gap=ci-dash;
+        const el=<circle key={i} cx={size/2} cy={size/2} r={r} fill="none" stroke={sg.color} strokeWidth={stroke} strokeDasharray={`${dash} ${gap}`} strokeDashoffset={-off} strokeLinecap="round"/>;
+        off+=dash; return el;
+      })}
+    </svg>
+  );
+}
+
+function AreaChart({data,color,h=70}) {
+  if(!data||data.length<2) return null;
+  const W=300,max=Math.max(...data.map(d=>d.v),1);
+  const pts=data.map((d,i)=>({x:(i/(data.length-1))*W,y:h-((d.v/max)*(h-8))-4}));
+  const line=pts.map((p,i)=>i===0?`M${p.x},${p.y}`:`C${pts[i-1].x+(pts[i].x-pts[i-1].x)/2},${pts[i-1].y} ${pts[i-1].x+(pts[i].x-pts[i-1].x)/2},${p.y} ${p.x},${p.y}`).join(" ");
+  const area=`${line} L${W},${h} L0,${h} Z`;
+  const id=`ag${color.replace("#","")}`;
+  return (
+    <svg width="100%" viewBox={`0 0 ${W} ${h}`} preserveAspectRatio="none" style={{display:"block"}}>
+      <defs><linearGradient id={id} x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stopColor={color} stopOpacity="0.3"/><stop offset="100%" stopColor={color} stopOpacity="0.02"/></linearGradient></defs>
+      <path d={area} fill={`url(#${id})`}/><path d={line} fill="none" stroke={color} strokeWidth="2.5" strokeLinecap="round"/>
+      {pts.map((p,i)=>data[i].today&&<circle key={i} cx={p.x} cy={p.y} r={4} fill={color} stroke="#080c14" strokeWidth={2}/>)}
+    </svg>
+  );
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+export default function App() {
+  const [data, setData] = useState(() => {
+    try { const s=localStorage.getItem("rendix_v2"); return s?JSON.parse(s):INIT_DATA; } catch{ return INIT_DATA; }
+  });
+  const [tab, setTab] = useState("hoy");
+  const [modal, setModal] = useState(null);
+  const [editItem, setEditItem] = useState(null);
+  const [cicloOffset, setCicloOffset] = useState(0);
+  const [cmpOffset, setCmpOffset] = useState(-1);
+  const [toast, setToast] = useState(null);
+  const [timer, setTimer] = useState({running:false,start:null,elapsed:0});
+  const [timerInterval, setTimerInterval] = useState(null);
+  const [shareMode, setShareMode] = useState(false);
+  const timerRef = useRef(null);
+
+  // persist
+  useEffect(() => {
+    try { localStorage.setItem("rendix_v2", JSON.stringify(data)); } catch{}
+  }, [data]);
+
+  const showToast = useCallback((msg,type="ok") => {
+    setToast({msg,type}); setTimeout(()=>setToast(null),2800);
+  },[]);
+
+  const upd = useCallback(fn => setData(p => ({...p,...fn({...p})})),[]);
+  const emp = data.emprendimientos.find(e=>e.id===data.activeEmp)||data.emprendimientos[0];
+  const empColor = emp?.color||"#f59e0b";
+  const diaCorte = data.diaCorte||1;
+  const cicloActual = useMemo(()=>getCiclo(diaCorte,cicloOffset),[diaCorte,cicloOffset]);
+  const cicloCmp   = useMemo(()=>getCiclo(diaCorte,cmpOffset),  [diaCorte,cmpOffset]);
+
+  // timer logic
+  const startTimer = () => {
+    const start = Date.now() - timer.elapsed*1000;
+    const iv = setInterval(() => setTimer(t=>({...t,elapsed:Math.floor((Date.now()-start)/1000)})),1000);
+    timerRef.current = iv;
+    setTimer({running:true,start,elapsed:timer.elapsed});
+    setTimerInterval(iv);
+  };
+  const stopTimer = () => {
+    clearInterval(timerRef.current);
+    setTimer(t=>({...t,running:false}));
+    setModal("ingreso");
+  };
+  const resetTimer = () => {
+    clearInterval(timerRef.current);
+    setTimer({running:false,start:null,elapsed:0});
+  };
+  useEffect(()=>()=>clearInterval(timerRef.current),[]);
+
+  // filtered data — ciclo personalizado
+  const inRange = (fecha,ciclo) => fecha>=ciclo.desde&&fecha<=ciclo.hasta;
+  const ingMes  = useMemo(()=>data.ingresos.filter(i=>i.empId===data.activeEmp&&inRange(i.fecha,cicloActual)),[data,cicloActual]);
+  const gastMes = useMemo(()=>data.gastos.filter(g=>g.empId===data.activeEmp&&inRange(g.fecha,cicloActual)),[data,cicloActual]);
+  const ingCmp  = useMemo(()=>data.ingresos.filter(i=>i.empId===data.activeEmp&&inRange(i.fecha,cicloCmp)),[data,cicloCmp]);
+  const gastCmp = useMemo(()=>data.gastos.filter(g=>g.empId===data.activeEmp&&inRange(g.fecha,cicloCmp)),[data,cicloCmp]);
+  const ingHoy  = useMemo(()=>data.ingresos.filter(i=>i.fecha===todayISO&&i.empId===data.activeEmp),[data]);
+
+  const calc = (ingresos, gastos) => {
+    const tI=ingresos.reduce((s,i)=>s+i.monto,0), tG=gastos.reduce((s,g)=>s+g.monto,0);
+    const tM=ingresos.reduce((s,i)=>s+i.duracion,0);
+    const byDate={}, bySem={}, bySrv={}, byCat={};
+    DAYS_FULL.forEach(d=>bySem[d]={monto:0,count:0,minutos:0});
+    ingresos.forEach(i=>{
+      const d=new Date(i.fecha), day=DAYS_FULL[d.getDay()];
+      if(!byDate[i.fecha]) byDate[i.fecha]={date:i.fecha,label:`${DAYS_ES[d.getDay()]} ${fmtDt(i.fecha)}`,monto:0,count:0,minutos:0,feriado:isHol(i.fecha),finde:isWknd(i.fecha)};
+      byDate[i.fecha].monto+=i.monto; byDate[i.fecha].count+=1; byDate[i.fecha].minutos+=i.duracion;
+      bySem[day].monto+=i.monto; bySem[day].count+=1; bySem[day].minutos+=i.duracion;
+      const s=i.servicio||"Sin especificar";
+      if(!bySrv[s]) bySrv[s]={monto:0,count:0,minutos:0};
+      bySrv[s].monto+=i.monto; bySrv[s].count+=1; bySrv[s].minutos+=i.duracion;
+    });
+    gastos.forEach(g=>{ const c=g.categoria||"Otros"; if(!byCat[c]) byCat[c]={monto:0,count:0}; byCat[c].monto+=g.monto; byCat[c].count+=1; });
+    const diasArr=Object.values(byDate).sort((a,b)=>b.monto-a.monto);
+    const srvArr=Object.entries(bySrv).sort((a,b)=>b[1].count-a[1].count);
+    const diasT=Object.keys(byDate).length;
+    // racha
+    const sortedDates=Object.keys(byDate).sort();
+    let racha=0, maxRacha=0, tmpR=1;
+    for(let i=1;i<sortedDates.length;i++){
+      const prev=new Date(sortedDates[i-1]), cur=new Date(sortedDates[i]);
+      const diff=(cur-prev)/(1000*60*60*24);
+      if(diff===1) tmpR++; else { maxRacha=Math.max(maxRacha,tmpR); tmpR=1; }
+    }
+    maxRacha=Math.max(maxRacha,tmpR);
+    // current racha from today
+    let rachaActual=0;
+    const today=new Date(todayISO);
+    for(let i=0;i<60;i++){
+      const d=new Date(today); d.setDate(d.getDate()-i);
+      if(byDate[isoOf(d)]) rachaActual++; else break;
+    }
+    return {tI,tG,bal:tI-tG,tM,ph:tM>0?(tI/(tM/60)):0,diasArr,bySem,srvArr,byCat,diasT,promD:diasT>0?tI/diasT:0,rachaActual,maxRacha,feriadosT:diasArr.filter(d=>d.feriado).length};
+  };
+
+  const anM = useMemo(()=>calc(ingMes,gastMes),[ingMes,gastMes]);
+  const anC = useMemo(()=>calc(ingCmp,gastCmp),[ingCmp,gastCmp]);
+
+  // logros
+  const logros = useMemo(()=>{
+    const all=[];
+    if(anM.rachaActual>=3) all.push({icon:"🔥",label:`${anM.rachaActual} días seguidos`,color:"#f97316"});
+    if(anM.feriadosT>0) all.push({icon:"🎉",label:`Trabajaste ${anM.feriadosT} feriado${anM.feriadosT>1?"s":""}`,color:"#ef4444"});
+    if(emp?.meta>0&&anM.tI>=emp.meta) all.push({icon:"🎯",label:"¡Meta alcanzada!",color:"#22c55e"});
+    if(anM.tI>anC.tI&&anC.tI>0) all.push({icon:"📈",label:"Mejor mes que el anterior",color:"#3b82f6"});
+    if(anM.srvArr.length>=5) all.push({icon:"⭐",label:`${anM.srvArr.length} servicios distintos`,color:"#8b5cf6"});
+    if(anM.diasT>=20) all.push({icon:"💪",label:"20+ días trabajados",color:"#10b981"});
+    return all;
+  },[anM,anC,emp]);
+
+  // proyección — basada en días transcurridos del ciclo actual
+  // area chart data
+  const areaData = useMemo(()=>{
+    const ini=cicloActual.inicio||cicloActual.ini, fin=cicloActual.fin;
+    const days=Math.round((fin-ini)/(864e5))+1;
+    const bd={};ingMes.forEach(i=>{if(!bd[i.fecha])bd[i.fecha]=0;bd[i.fecha]+=i.monto;});
+    return Array.from({length:Math.min(days,31)},(_,i2)=>{const d=new Date(ini);d.setDate(d.getDate()+i2);const ds=isoOf(d);return {v:bd[ds]||0,today:ds===todayISO};});
+  },[ingMes,cicloActual]);
+
+    const proyeccion = useMemo(()=>{
+    const hoy=new Date(todayISO), inicio=cicloActual.inicio, fin=cicloActual.fin;
+    const diasTotal=Math.round((fin-inicio)/(1000*60*60*24))+1;
+    const diasTransc=Math.max(1,Math.round((hoy-inicio)/(1000*60*60*24))+1);
+    if(anM.tI===0) return null;
+    return Math.round((anM.tI/diasTransc)*diasTotal);
+  },[anM,cicloActual]);
+
+  // clientes analytics
+  const clientesStats = useMemo(()=>{
+    const map={};
+    data.ingresos.filter(i=>i.empId===data.activeEmp&&i.cliente).forEach(i=>{
+      if(!map[i.cliente]) map[i.cliente]={nombre:i.cliente,total:0,count:0,servicios:new Set(),ultima:""};
+      map[i.cliente].total+=i.monto; map[i.cliente].count+=1;
+      if(i.servicio) map[i.cliente].servicios.add(i.servicio);
+      if(!map[i.cliente].ultima||i.fecha>map[i.cliente].ultima) map[i.cliente].ultima=i.fecha;
+    });
+    return Object.values(map).sort((a,b)=>b.total-a.total).map(c=>({...c,servicios:[...c.servicios]}));
+  },[data]);
+
+  const isDark = data.theme==="dark";
+  const S = isDark ? DS : LS;
+
+  if(!data.onboarded) return <Onboard onDone={nombre=>{ upd(d=>{ d.emprendimientos=[{id:"e1",nombre,color:"#f59e0b",icon:"briefcase",meta:0}]; d.activeEmp="e1"; d.onboarded=true; return d; }); }} isDark={isDark} S={S} />;
+
+  return (
+    <div style={{...S.root, fontFamily:"'Sora',system-ui,sans-serif"}}>
+      <style>{`
+        @import url('https://fonts.googleapis.com/css2?family=Sora:wght@400;500;600;700;800&family=JetBrains+Mono:wght@500;700&display=swap');
+        *{box-sizing:border-box;-webkit-tap-highlight-color:transparent;}
+        body{margin:0;background:${isDark?"#080c14":"#f4f6fa"};}
+        ::-webkit-scrollbar{width:3px;height:3px;}
+        ::-webkit-scrollbar-thumb{background:rgba(128,128,128,0.15);border-radius:3px;}
+        input,button,textarea{font-family:inherit;}
+        input[type=date]::-webkit-calendar-picker-indicator,input[type=time]::-webkit-calendar-picker-indicator{filter:${isDark?"invert(0.5)":"none"};cursor:pointer;}
+        input:focus,textarea:focus{border-color:${empColor}!important;box-shadow:0 0 0 3px ${empColor}22!important;}
+        @keyframes slideUp{from{transform:translateY(32px);opacity:0}to{transform:translateY(0);opacity:1}}
+        @keyframes fadeIn{from{opacity:0}to{opacity:1}}
+        @keyframes toastIn{from{transform:translateX(120%);opacity:0}to{transform:translateX(0);opacity:1}}
+        @keyframes pulse{0%,100%{opacity:1}50%{opacity:0.4}}
+        @keyframes popIn{0%{transform:scale(0.85);opacity:0}60%{transform:scale(1.03)}100%{transform:scale(1);opacity:1}}
+        .tap:active{opacity:0.65;transform:scale(0.96);}
+        .hover-lift:hover{transform:translateY(-2px);box-shadow:0 10px 28px rgba(0,0,0,0.25);border-color:rgba(255,255,255,0.1)!important;}
+        .mono{font-family:'JetBrains Mono',monospace;}
+      `}</style>
+
+      {/* HEADER */}
+      <header style={S.hdr}>
+        <div style={S.hdrTop}>
+          <div style={{display:"flex",alignItems:"center",gap:10}}>
+            <div style={{...S.logoBox,background:empColor}}>R</div>
+            <div>
+              <div style={{fontSize:12,color:isDark?"#64748b":"#9ca3af",marginBottom:2}}>Hola, {emp?.nombre.split(" ")[0]} 👋</div>
+              <div style={{...S.appName,fontSize:18}}>{emp?.nombre}</div>
+            </div>
+          </div>
+          <div style={{display:"flex",gap:6,alignItems:"center",flexWrap:"wrap",justifyContent:"flex-end"}}>
+            {data.emprendimientos.map(e=>(
+              <button key={e.id} className="tap" onClick={()=>upd(d=>{d.activeEmp=e.id;return d;})}
+                style={{...S.empBtn,background:data.activeEmp===e.id?e.color:"transparent",
+                  color:data.activeEmp===e.id?"#000":(isDark?"#94a3b8":"#64748b"),
+                  border:data.activeEmp===e.id?"none":`1px solid ${isDark?"rgba(255,255,255,0.12)":"#e2e8f0"}`}}>
+                {EMP_ICONS[e.icon]||"💼"} {e.nombre}
+              </button>
+            ))}
+            <button className="tap" onClick={()=>setModal("emp")} style={S.iconAction} title="Nuevo emprendimiento">＋</button>
+            <button className="tap" onClick={()=>upd(d=>{d.theme=d.theme==="dark"?"light":"dark";return d;})} style={S.iconAction}>{isDark?"☀️":"🌙"}</button>
+          </div>
+        </div>
+
+        {/* meta progress */}
+        {emp?.meta>0&&(
+          <div style={{padding:"0 0 8px"}}>
+            <div style={{display:"flex",justifyContent:"space-between",fontSize:11,color:isDark?"#475569":"#94a3b8",marginBottom:4}}>
+              <span>Meta del ciclo</span>
+              <span style={{fontWeight:700,color:anM.tI>=emp.meta?"#22c55e":empColor}}>{fmtM(anM.tI)} / {fmtM(emp.meta)} ({Math.min(100,Math.round((anM.tI/emp.meta)*100))}%)</span>
+            </div>
+            <div style={{height:5,background:isDark?"rgba(255,255,255,0.06)":"#e2e8f0",borderRadius:3,overflow:"hidden"}}>
+              <div style={{height:"100%",width:`${Math.min(100,(anM.tI/emp.meta)*100)}%`,background:anM.tI>=emp.meta?"#22c55e":empColor,borderRadius:3,transition:"width 1s ease"}} />
+            </div>
+          </div>
+        )}
+
+        {/* ciclo navigator */}
+        <div style={{display:"flex",alignItems:"center",gap:8,paddingBottom:8}}>
+          <button className="tap" onClick={()=>setCicloOffset(o=>o-1)} style={{...S.mBtn,padding:"4px 10px",color:isDark?"#64748b":"#94a3b8",border:`1px solid ${isDark?"rgba(255,255,255,0.08)":"#e2e8f0"}`,borderRadius:20}}>‹</button>
+          <div style={{flex:1,textAlign:"center"}}>
+            <div style={{fontSize:13,fontWeight:800,color:"#fff"}}>{labelCiclo(cicloActual)}</div>
+            <div style={{fontSize:10,color:isDark?"#475569":"#94a3b8"}}>{cicloOffset===0?"Ciclo actual":cicloOffset===-1?"Ciclo anterior":`Hace ${Math.abs(cicloOffset)} ciclos`}</div>
+          </div>
+          <button className="tap" onClick={()=>setCicloOffset(o=>Math.min(0,o+1))} style={{...S.mBtn,padding:"4px 10px",color:cicloOffset===0?(isDark?"#1e293b":"#e2e8f0"):(isDark?"#64748b":"#94a3b8"),border:`1px solid ${isDark?"rgba(255,255,255,0.08)":"#e2e8f0"}`,borderRadius:20,opacity:cicloOffset===0?0.3:1}}>›</button>
+          {cicloOffset!==0&&<button className="tap" onClick={()=>setCicloOffset(0)} style={{...S.mBtn,padding:"3px 8px",fontSize:10,color:empColor,border:`1px solid ${empColor}33`,borderRadius:20}}>Hoy</button>}
+        </div>
+      </header>
+
+      {/* STRIP */}
+      <div style={S.strip}>
+        {[[fmtM(anM.tI),"Ingresos",empColor,pct(anM.tI,anC.tI),false],
+          [fmtM(anM.tG),"Gastos","#ef4444",pct(anM.tG,anC.tG),true],
+          [fmtM(anM.bal),"Balance",anM.bal>=0?"#22c55e":"#ef4444",pct(anM.bal,anC.bal),false],
+          [fmtH(anM.tM),"Horas","#818cf8",pct(anM.tM,anC.tM),false],
+          [anM.ph>0?fmtM(Math.round(anM.ph)):"—","$/hora","#34d399",pct(Math.round(anM.ph),Math.round(anC.ph)),false],
+        ].map(([v,l,c,p,inv])=>(
+          <div key={l} style={{flex:"0 0 auto",padding:"9px 12px",borderTop:`3px solid ${c}`,minWidth:82}}>
+            <div style={{fontSize:11,color:isDark?"#475569":"#94a3b8",marginBottom:2,textTransform:"uppercase",letterSpacing:0.5}}>{l}</div>
+            <div className="mono" style={{color:c,fontSize:16,fontWeight:700,letterSpacing:"-0.3px"}}>{v}</div>
+            {p!==null&&<div style={{fontSize:11,color:arrowClr(p,inv),marginTop:2}}>{arrowPct(p)}</div>}
+          </div>
+        ))}
+        {proyeccion&&(
+          <div style={{flex:"0 0 auto",padding:"9px 12px",borderTop:"3px solid #a78bfa",minWidth:90}}>
+            <div style={{fontSize:9,color:isDark?"#475569":"#94a3b8",marginBottom:1,textTransform:"uppercase",letterSpacing:0.5}}>Proyección</div>
+            <div style={{color:"#a78bfa",fontSize:13,fontWeight:800}}>{fmtM(proyeccion)}</div>
+            <div style={{fontSize:11,color:isDark?"#475569":"#94a3b8"}}>al cierre</div>
+          </div>
+        )}
+      </div>
+
+      {/* logros strip */}
+      {logros.length>0&&(
+        <div style={{display:"flex",gap:6,overflowX:"auto",padding:"8px 12px",background:isDark?"#0f172a":"#fff",borderBottom:`1px solid ${isDark?"rgba(255,255,255,0.04)":"#e2e8f0"}`}}>
+          {logros.map((l,i)=>(
+            <div key={i} style={{display:"flex",alignItems:"center",gap:4,background:`rgba(${hexRgb(l.color)},0.12)`,borderRadius:20,padding:"4px 10px",flexShrink:0}}>
+              <span style={{fontSize:16}}>{l.icon}</span>
+              <span style={{fontSize:13,color:l.color,fontWeight:700,whiteSpace:"nowrap"}}>{l.label}</span>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* TABS */}
+      <nav style={{position:"fixed",bottom:0,left:"50%",transform:"translateX(-50%)",width:"100%",maxWidth:430,background:isDark?"rgba(8,12,20,0.97)":"rgba(255,255,255,0.97)",backdropFilter:"blur(20px)",borderTop:`1px solid ${isDark?"rgba(255,255,255,0.07)":"#e2e8f0"}`,display:"flex",alignItems:"center",zIndex:50,paddingBottom:"env(safe-area-inset-bottom)"}}>
+        {[["hoy","📋","Hoy"],["gastos","💸","Gastos"],null,["cal","📅","Agenda"],["stats","📊","Stats"]].map((item,i)=>{
+          if(!item) return (
+            <div key="fab" style={{flex:1,display:"flex",justifyContent:"center",alignItems:"center",padding:"6px 0"}}>
+              <button className="btn-press" onClick={()=>setModal("ingreso")}
+                style={{width:56,height:56,borderRadius:18,background:`linear-gradient(135deg,${empColor},${empColor}aa)`,border:"none",fontSize:26,color:"#000",cursor:"pointer",fontWeight:900,boxShadow:`0 4px 20px rgba(${hexRgb(empColor)},0.5)`,display:"flex",alignItems:"center",justifyContent:"center",marginBottom:12}}>＋</button>
+            </div>
+          );
+          const [v,ic,lb]=item;
+          return (
+            <button key={v} className="btn-press" onClick={()=>setTab(v)}
+              style={{flex:1,padding:"10px 0 7px",background:"none",border:"none",cursor:"pointer",display:"flex",flexDirection:"column",alignItems:"center",gap:2}}>
+              <span style={{fontSize:20,filter:tab===v?"none":"grayscale(1)",opacity:tab===v?1:0.35}}>{ic}</span>
+              <span style={{fontSize:11,color:tab===v?empColor:(isDark?"#2d3f5a":"#94a3b8"),fontWeight:tab===v?700:500}}>{lb}</span>
+              {tab===v&&<div style={{width:16,height:3,borderRadius:2,background:empColor,marginTop:1}}/>}
+            </button>
+          );
+        })}
+      </nav>
+
+      {/* TIMER BAR */}
+      {(tab==="hoy"||timer.running)&&(
+        <div style={{background:isDark?"#0f1929":"#fff",padding:"8px 14px",display:"flex",alignItems:"center",gap:10,borderBottom:`1px solid ${isDark?"rgba(255,255,255,0.05)":"#e2e8f0"}`}}>
+          <div style={{color:isDark?"#64748b":"#94a3b8",fontSize:14}}>⏱ Cronómetro:</div>
+          <div style={{fontWeight:800,fontSize:18,color:timer.running?empColor:(isDark?"#334155":"#cbd5e1"),fontVariantNumeric:"tabular-nums",minWidth:64}}>
+            {String(Math.floor(timer.elapsed/3600)).padStart(2,"0")}:{String(Math.floor((timer.elapsed%3600)/60)).padStart(2,"0")}:{String(timer.elapsed%60).padStart(2,"0")}
+          </div>
+          {!timer.running
+            ? <button className="tap" onClick={startTimer} style={{...S.timerBtn,background:empColor,color:"#000"}}>▶ Iniciar</button>
+            : <>
+                <button className="tap" onClick={stopTimer} style={{...S.timerBtn,background:"#22c55e",color:"#000"}}>⏹ Registrar</button>
+                <button className="tap" onClick={resetTimer} style={{...S.timerBtn,background:"rgba(255,255,255,0.08)",color:isDark?"#94a3b8":"#64748b"}}>↺</button>
+              </>
+          }
+        </div>
+      )}
+
+      {/* MAIN */}
+      <main style={S.main}>
+        {tab==="hoy"    && <TabHoy ingHoy={ingHoy} ingMes={ingMes} empColor={empColor} onAdd={()=>setModal("ingreso")} onDel={id=>{upd(d=>{d.ingresos=d.ingresos.filter(i=>i.id!==id);return d;});showToast("Eliminado","warn");}} onEdit={i=>{setEditItem(i);setModal("editIng");}} notaHoy={data.notas?.[todayISO]||""} onNota={v=>upd(d=>{d.notas={...d.notas,[todayISO]:v};return d;})} isDark={isDark} S={S} />}
+        {tab==="gastos" && <TabGastos gastMes={gastMes} anM={anM} empColor={empColor} onAdd={()=>setModal("gasto")} onDel={id=>{upd(d=>{d.gastos=d.gastos.filter(g=>g.id!==id);return d;});showToast("Eliminado","warn");}} onEdit={g=>{setEditItem(g);setModal("editGasto");}} isDark={isDark} S={S} />}
+        {tab==="cal"    && <TabCal ingMes={ingMes} gastMes={gastMes} cicloActual={cicloActual} empColor={empColor} isDark={isDark} S={S} />}
+        {tab==="stats"  && <TabStats anM={anM} anC={anC} ingMes={ingMes} cicloActual={cicloActual} empColor={empColor} meta={emp?.meta||0} proyeccion={proyeccion} isDark={isDark} S={S} />}
+        {tab==="vs"     && <TabVs anM={anM} anC={anC} cicloActual={cicloActual} cicloCmp={cicloCmp} cmpOffset={cmpOffset} diaCorte={diaCorte} onSetCmp={(o)=>setCmpOffset(o)} empColor={empColor} isDark={isDark} S={S} />}
+        {tab==="clientes"&&<TabClientes stats={clientesStats} empColor={empColor} isDark={isDark} S={S} />}
+        {tab==="config" && <TabConfig data={data} upd={upd} empColor={empColor} isDark={isDark} S={S} showToast={showToast} />}
+      </main>
+
+      {/* FAB */}
+      {(tab==="hoy"||tab==="gastos")&&(
+        <button className="tap" onClick={()=>setModal(tab==="gastos"?"gasto":"ingreso")}
+          style={{...S.fab,background:tab==="gastos"?"#ef4444":empColor}}>＋</button>
+      )}
+
+      {/* MODALS */}
+      {modal==="ingreso"  &&<ModalIng onClose={()=>{setModal(null);}} onSave={item=>{upd(d=>{d.ingresos=[...d.ingresos,{...item,id:uid(),empId:d.activeEmp}];return d;});setModal(null);showToast("Ingreso registrado ✓");}} timerMins={timer.elapsed>0?Math.round(timer.elapsed/60):0} onTimerUsed={resetTimer} isDark={isDark} S={S} empColor={empColor} />}
+      {modal==="editIng"  &&editItem&&<ModalIng existing={editItem} onClose={()=>{setModal(null);setEditItem(null);}} onSave={item=>{upd(d=>{d.ingresos=d.ingresos.map(i=>i.id===item.id?item:i);return d;});setModal(null);setEditItem(null);showToast("Editado ✓");}} isDark={isDark} S={S} empColor={empColor} />}
+      {modal==="gasto"    &&<ModalGasto onClose={()=>setModal(null)} onSave={item=>{upd(d=>{d.gastos=[...d.gastos,{...item,id:uid(),empId:d.activeEmp}];return d;});setModal(null);showToast("Gasto registrado ✓");}} isDark={isDark} S={S} />}
+      {modal==="editGasto"&&editItem&&<ModalGasto existing={editItem} onClose={()=>{setModal(null);setEditItem(null);}} onSave={item=>{upd(d=>{d.gastos=d.gastos.map(g=>g.id===item.id?item:g);return d;});setModal(null);setEditItem(null);showToast("Gasto editado ✓");}} isDark={isDark} S={S} />}
+      {modal==="emp"      &&<ModalEmp onClose={()=>setModal(null)} onSave={e=>{upd(d=>{const ne={...e,id:uid(),meta:0};d.emprendimientos=[...d.emprendimientos,ne];d.activeEmp=ne.id;return d;});setModal(null);showToast("Emprendimiento creado ✓");}} isDark={isDark} S={S} />}
+
+      {/* TOAST */}
+      {toast&&<div style={{...S.toast,background:toast.type==="warn"?"#ef4444":empColor,color:toast.type==="warn"?"#fff":"#000"}}>{toast.msg}</div>}
+    </div>
+  );
+}
+
+// ════════ ONBOARD ════════
+function Onboard({onDone,isDark,S}) {
+  const [nombre,setNombre]=useState("");
+  return (
+    <div style={{minHeight:"100vh",background:isDark?"#080c14":"#f4f6fa",display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",padding:24,fontFamily:"'Nunito',system-ui"}}>
+      <style>{`@import url('https://fonts.googleapis.com/css2?family=Nunito:wght@400;700;800;900&display=swap');*{box-sizing:border-box}`}</style>
+      <div style={{fontSize:56,marginBottom:16,animation:"popIn 0.5s ease"}}>💼</div>
+      <div style={{fontSize:28,fontWeight:900,color:isDark?"#fff":"#1e293b",marginBottom:8}}>Bienvenido/a a Rendix</div>
+      <div style={{fontSize:15,color:isDark?"#64748b":"#94a3b8",marginBottom:32,textAlign:"center",maxWidth:320}}>Tu app para controlar ingresos, gastos y analizar el rendimiento de tu emprendimiento.</div>
+      <div style={{width:"100%",maxWidth:360}}>
+        <label style={{fontSize:12,fontWeight:700,color:isDark?"#64748b":"#94a3b8",textTransform:"uppercase",letterSpacing:0.5,display:"block",marginBottom:8}}>¿Cómo se llama tu emprendimiento?</label>
+        <input value={nombre} onChange={e=>setNombre(e.target.value)} onKeyDown={e=>e.key==="Enter"&&nombre.trim()&&onDone(nombre.trim())}
+          placeholder="Ej: Aluminio García, Ginails..." autoFocus
+          style={{width:"100%",background:isDark?"rgba(255,255,255,0.06)":"#fff",border:`2px solid ${isDark?"rgba(255,255,255,0.1)":"#e2e8f0"}`,borderRadius:12,padding:"14px 16px",color:isDark?"#fff":"#1e293b",fontSize:16,outline:"none",marginBottom:14}} />
+        <button onClick={()=>nombre.trim()&&onDone(nombre.trim())}
+          style={{width:"100%",padding:"14px",borderRadius:12,background:"#f59e0b",color:"#000",fontWeight:800,border:"none",cursor:"pointer",fontSize:16}}>
+          Empezar →
+        </button>
+      </div>
+      <div style={{marginTop:32,fontSize:12,color:isDark?"#334155":"#cbd5e1",textAlign:"center"}}>Tus datos se guardan en este dispositivo 🔒</div>
+    </div>
+  );
+}
+
+// ════════ TAB HOY ════════
+function TabHoy({ingHoy,ingMes,empColor,onAdd,onDel,onEdit,notaHoy,onNota,isDark,S}) {
+  const [notaEdit,setNotaEdit]=useState(false);
+  const [notaVal,setNotaVal]=useState(notaHoy);
+  const tHoy=ingHoy.reduce((s,i)=>s+i.monto,0);
+  const mHoy=ingHoy.reduce((s,i)=>s+i.duracion,0);
+  const isFer=isHol(todayISO), isFin=isWknd(todayISO);
+  return (
+    <div style={{animation:"slideUp 0.3s ease"}}>
+      <div style={S.dayBanner}>
+        <div>
+          <div style={S.dayTitle}>{new Date().toLocaleDateString("es-AR",{weekday:"long",day:"numeric",month:"long"})}</div>
+          {(isFer||isFin)&&<span style={{...S.badge,background:isFer?"#ef4444":"#f59e0b",marginTop:4,display:"inline-block"}}>{isFer?"🎉 Feriado nacional":"📅 Fin de semana"}</span>}
+        </div>
+        <div style={{textAlign:"right"}}>
+          <div style={{color:empColor,fontWeight:900,fontSize:24}}>{fmtM(tHoy)}</div>
+          <div style={{color:isDark?"#475569":"#94a3b8",fontSize:12}}>{mHoy>0?fmtH(mHoy):""}</div>
+        </div>
+      </div>
+
+      {/* nota del día */}
+      <div style={{...S.sec,marginBottom:12,padding:"10px 14px"}}>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:notaEdit?8:0}}>
+          <span style={{fontSize:12,color:isDark?"#475569":"#9ca3af",fontWeight:700}}>📝 Nota del día</span>
+          <button className="tap" onClick={()=>{if(notaEdit){onNota(notaVal);} setNotaEdit(!notaEdit);}} style={{fontSize:12,background:isDark?"rgba(255,255,255,0.06)":"#f1f5f9",border:"none",color:isDark?"#94a3b8":"#64748b",padding:"3px 10px",borderRadius:20,cursor:"pointer",fontWeight:700}}>{notaEdit?"Guardar":"Editar"}</button>
+        </div>
+        {notaEdit
+          ? <textarea value={notaVal} onChange={e=>setNotaVal(e.target.value)} placeholder="Pendientes, materiales, recordatorios..." style={{width:"100%",background:"transparent",border:"none",color:isDark?"#e2e8f0":"#334155",fontSize:13,resize:"none",outline:"none",minHeight:60}} />
+          : notaVal?<div style={{fontSize:14,color:isDark?"#94a3b8":"#64748b",marginTop:4}}>{notaVal}</div>:<div style={{fontSize:12,color:isDark?"#2d3748":"#cbd5e1",marginTop:4}}>Sin notas — tocá Editar</div>
+        }
+      </div>
+
+      {ingHoy.length===0?<Empty icon="📋" t="Todavía no registraste ingresos hoy" s="Tocá ＋ o usá el cronómetro" />:
+        <div style={S.list}>{ingHoy.sort((a,b)=>b.hora.localeCompare(a.hora)).map(i=><ICard key={i.id} item={i} color={empColor} onDel={onDel} onEdit={onEdit} isDark={isDark} S={S} />)}</div>}
+
+      {ingMes.length>0&&(
+        <div style={{marginTop:24}}>
+          <SL>Todos los ingresos del mes</SL>
+          <div style={S.list}>{[...ingMes].sort((a,b)=>b.fecha.localeCompare(a.fecha)||b.hora.localeCompare(a.hora)).map(i=><ICard key={i.id} item={i} color={empColor} onDel={onDel} onEdit={onEdit} showDate isDark={isDark} S={S} />)}</div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ICard({item,color,onDel,onEdit,showDate,isDark,S}) {
+  const fer=isHol(item.fecha), fin=isWknd(item.fecha);
+  return (
+    <div className="hover-lift" style={S.card}>
+      <div style={{...S.cBar,background:color}} />
+      <div style={{flex:1,minWidth:0}}>
+        <div style={{display:"flex",justifyContent:"space-between",gap:8,alignItems:"flex-start"}}>
+          <div style={{minWidth:0}}>
+            <span style={S.cTitle}>{item.servicio||"Trabajo"}</span>
+            {item.cliente&&<span style={S.chip}> · {item.cliente}</span>}
+            {fer&&<span style={{...S.chip,color:"#ef4444"}}> 🎉</span>}
+            {fin&&!fer&&<span style={{...S.chip,color:"#f59e0b"}}> 📅</span>}
+          </div>
+          <span style={{...S.cMonto,color:"#22c55e",flexShrink:0}}>{fmtM(item.monto)}</span>
+        </div>
+        <div style={S.cMeta}>
+          {showDate&&<span>{fmtDt(item.fecha)} · </span>}
+          <span>{item.hora}</span>
+          {item.duracion>0&&<span> · ⏱ {fmtH(item.duracion)}</span>}
+          {item.nota&&<span> · {item.nota}</span>}
+        </div>
+      </div>
+      <div style={{display:"flex",gap:2}}>
+        <button className="tap" onClick={()=>onEdit(item)} style={S.iBtn} title="Editar">✏️</button>
+        <button className="tap" onClick={()=>onDel(item.id)} style={S.iBtn}>✕</button>
+      </div>
+    </div>
+  );
+}
+
+// ════════ TAB GASTOS ════════
+function TabGastos({gastMes,anM,empColor,onAdd,onDel,onEdit,isDark,S}) {
+  const catArr=Object.entries(anM.byCat||{}).sort((a,b)=>b[1].monto-a[1].monto);
+  const maxC=catArr[0]?.[1]?.monto||1;
+  return (
+    <div style={{animation:"slideUp 0.3s ease"}}>
+      <div style={S.dayBanner}>
+        <span style={S.dayTitle}>Gastos del mes</span>
+        <span style={{color:"#ef4444",fontWeight:900,fontSize:20}}>{fmtM(anM.tG)}</span>
+      </div>
+      {catArr.length>0&&(
+        <div style={{...S.sec,marginBottom:14}}>
+          <SL>Por categoría</SL>
+          {catArr.map(([c,info])=>(
+            <div key={c} style={{display:"flex",alignItems:"center",gap:8,marginBottom:7}}>
+              <span style={{width:90,fontSize:12,color:isDark?"#94a3b8":"#64748b"}}>{c}</span>
+              <div style={{flex:1,height:7,background:isDark?"rgba(255,255,255,0.05)":"#f1f5f9",borderRadius:4,overflow:"hidden"}}>
+                <div style={{height:"100%",width:`${(info.monto/maxC)*100}%`,background:"#ef4444",borderRadius:4}} />
+              </div>
+              <span style={{width:70,textAlign:"right",fontSize:12,color:"#ef4444",fontWeight:700}}>{fmtM(info.monto)}</span>
+            </div>
+          ))}
+        </div>
+      )}
+      {gastMes.length===0?<Empty icon="💸" t="Sin gastos registrados" s="Tocá ＋ para agregar" />:
+        <div style={S.list}>{[...gastMes].sort((a,b)=>b.fecha.localeCompare(a.fecha)).map(g=>(
+          <div key={g.id} className="hover-lift" style={S.card}>
+            <div style={{...S.cBar,background:"#ef4444"}} />
+            <div style={{flex:1}}>
+              <div style={{display:"flex",justifyContent:"space-between"}}><span style={S.cTitle}>{g.categoria}: {g.descripcion}</span><span style={{...S.cMonto,color:"#ef4444"}}>-{fmtM(g.monto)}</span></div>
+              <div style={S.cMeta}>{fmtDt(g.fecha)}</div>
+            </div>
+            <div style={{display:"flex",gap:2,flexShrink:0}}>
+              <button className="tap" onClick={()=>onEdit(g)} style={{...S.iBtn,fontSize:13}} title="Editar">✏️</button>
+              <button className="tap" onClick={()=>onDel(g.id)} style={S.iBtn}>✕</button>
+            </div>
+          </div>
+        ))}</div>
+      }
+    </div>
+  );
+}
+
+// ════════ TAB CALENDARIO ════════
+function TabCal({ingMes,gastMes,cicloActual,empColor,isDark,S}) {
+  const [selDay,setSelDay]=useState(null);
+  const calStart=cicloActual.inicio, calEnd=cicloActual.fin;
+  const dim=Math.round((calEnd-calStart)/(1000*60*60*24))+1, fd=calStart.getDay();
+  const byDate={};
+  ingMes.forEach(i=>{ if(!byDate[i.fecha]) byDate[i.fecha]={monto:0,count:0,minutos:0,items:[]}; byDate[i.fecha].monto+=i.monto; byDate[i.fecha].count+=1; byDate[i.fecha].minutos+=i.duracion; byDate[i.fecha].items.push(i); });
+  const gastByDate={};
+  gastMes.forEach(g=>{ if(!gastByDate[g.fecha]) gastByDate[g.fecha]=0; gastByDate[g.fecha]+=g.monto; });
+  const maxM=Math.max(...Object.values(byDate).map(d=>d.monto),1);
+  const selStr=selDay?(()=>{const d=new Date(calStart);d.setDate(d.getDate()+(selDay-1));return isoOf(d);})():null;
+  const selD=selStr?byDate[selStr]:null;
+  return (
+    <div style={{animation:"slideUp 0.3s ease"}}>
+      <div style={{display:"grid",gridTemplateColumns:"repeat(7,1fr)",gap:3,marginBottom:12}}>
+        {DAYS_ES.map(d=><div key={d} style={{textAlign:"center",fontSize:11,color:isDark?"#334155":"#cbd5e1",padding:"4px 0",fontWeight:800}}>{d}</div>)}
+        {Array(fd).fill(null).map((_,i)=><div key={`e${i}`} />)}
+        {Array(dim).fill(null).map((_,i)=>{
+          const day=i+1, dayD=new Date(calStart); dayD.setDate(dayD.getDate()+i); const ds=isoOf(dayD);
+          const d=byDate[ds], g=gastByDate[ds], fer=isHol(ds), fin=isWknd(ds);
+          const intensity=d?Math.max(0.12,d.monto/maxM):0;
+          return (
+            <div key={day} className="tap" onClick={()=>setSelDay(selDay===day?null:day)}
+              style={{borderRadius:8,padding:"5px 3px",minHeight:54,display:"flex",flexDirection:"column",alignItems:"center",gap:1,cursor:"pointer",
+                background:d?`rgba(${hexRgb(empColor)},${intensity})`:(fer?"rgba(239,68,68,0.07)":(fin?(isDark?"rgba(255,255,255,0.02)":"rgba(0,0,0,0.02)"):"transparent")),
+                border:selDay===day?`2px solid ${empColor}`:"2px solid transparent",transition:"all 0.15s"}}>
+              <span style={{fontSize:13,fontWeight:d?800:fin?600:400,color:fer?"#ef4444":(fin?(isDark?"#64748b":"#9ca3af"):(isDark?"#e2e8f0":"#334155"))}}>{dayD.getDate()}</span>
+              {fer&&<span style={{fontSize:8}}>🎉</span>}
+              {d&&<span style={{fontSize:12,color:empColor,fontWeight:800}}>{fmtM(d.monto)}</span>}
+              {d&&<span style={{fontSize:9,color:isDark?"#475569":"#94a3b8"}}>{d.count}✓</span>}
+              {g&&!d&&<span style={{fontSize:9,color:"#ef4444"}}>{fmtM(g)}</span>}
+            </div>
+          );
+        })}
+      </div>
+      {selD&&(
+        <div style={{...S.sec,animation:"fadeIn 0.2s ease"}}>
+          <SL>📅 {fmtDt(selStr)} {isHol(selStr)?"🎉 Feriado":""} {isWknd(selStr)?"📅 Fin de semana":""}</SL>
+          <div style={{display:"flex",gap:8,marginBottom:10,flexWrap:"wrap"}}>
+            <Pill l="Total" v={fmtM(selD.monto)} c={empColor} />
+            <Pill l="Trabajos" v={selD.count} c="#818cf8" />
+            <Pill l="Tiempo" v={fmtH(selD.minutos)} c="#34d399" />
+          </div>
+          <div style={S.list}>{selD.items.map(i=>(
+            <div key={i.id} style={{...S.card,padding:"9px 10px"}}>
+              <div style={{...S.cBar,background:empColor}} />
+              <div style={{flex:1}}><div style={{display:"flex",justifyContent:"space-between"}}><span style={S.cTitle}>{i.servicio||"Trabajo"}</span><span style={{color:"#22c55e",fontWeight:700}}>{fmtM(i.monto)}</span></div><div style={S.cMeta}>{i.hora}{i.duracion>0?` · ${fmtH(i.duracion)}`:""}</div></div>
+            </div>
+          ))}</div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ════════ TAB STATS ════════
+function TabStats({anM,anC,ingMes,cicloActual,empColor,meta,proyeccion,isDark,S}) {
+  const {tI,tG,bal,tM,ph,diasArr,bySem,srvArr,byCat,diasT,promD,rachaActual,maxRacha,feriadosT}=anM;
+  const maxD=diasArr[0]?.monto||1, maxS=Math.max(...Object.values(bySem).map(d=>d.monto))||1, maxSrv=srvArr[0]?.[1]?.count||1;
+  const insights=[];
+  if(ph>0) insights.push({c:ph>2000?"#22c55e":"#f59e0b",i:"⏱",t:`Tu hora vale ${fmtM(Math.round(ph))}. ${ph<1500?"Considerá subir los precios.":ph<3500?"Buen rendimiento horario.":"¡Excelente valor hora!"}`});
+  if(diasArr[0]) insights.push({c:empColor,i:"🏆",t:`Mejor día: ${diasArr[0].label} — ${fmtM(diasArr[0].monto)} (${diasArr[0].count} trab.)`});
+  if(srvArr[0]) insights.push({c:"#818cf8",i:"⭐",t:`Servicio top: "${srvArr[0][0]}" — ${srvArr[0][1].count} veces, ${fmtM(srvArr[0][1].monto)}`});
+  if(rachaActual>=2) insights.push({c:"#f97316",i:"🔥",t:`¡Racha activa de ${rachaActual} días! Tu récord es ${maxRacha} días.`});
+  if(feriadosT>0) insights.push({c:"#ef4444",i:"🎉",t:`Trabajaste ${feriadosT} feriado${feriadosT>1?"s":""} — ¡doble mérito!`});
+  if(bal<0) insights.push({c:"#ef4444",i:"⚠️",t:`Los gastos superaron los ingresos por ${fmtM(Math.abs(bal))}. Revisá tus costos.`});
+  else if(bal>0) insights.push({c:"#22c55e",i:"✅",t:`Balance positivo de ${fmtM(bal)}. ¡Mes rentable!`});
+  if(meta>0) insights.push({c:tI>=meta?"#22c55e":"#f59e0b",i:"🎯",t:tI>=meta?`¡Superaste tu meta de ${fmtM(meta)}!`:`Faltan ${fmtM(meta-tI)} para tu meta de ${fmtM(meta)}.`});
+  if(proyeccion&&proyeccion>tI) insights.push({c:"#a78bfa",i:"📈",t:`A este ritmo, cerrarías el mes con ${fmtM(proyeccion)}.`});
+
+  if(ingMes.length===0) return <Empty icon="📊" t={`Sin datos para este ciclo (${labelCiclo(cicloActual)})`} s="Registrá ingresos para ver el análisis" />;
+  return (
+    <div style={{display:"flex",flexDirection:"column",gap:14,animation:"slideUp 0.3s ease"}}>
+      <div style={S.sec}>
+        <SL>💰 Balance General</SL>
+        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}}>
+          {[[fmtM(tI),"Total generado",empColor],[fmtM(tG),"Total gastos","#ef4444"],[fmtM(bal),"Balance neto",bal>=0?"#22c55e":"#ef4444",true],[fmtH(tM),"Horas trabajadas","#818cf8"],[ph>0?fmtM(Math.round(ph)):"—","Valor real $/hora","#34d399"],[String(diasT),"Días trabajados","#f97316"],[fmtM(Math.round(promD)),"Promedio por día","#06b6d4"],meta>0?[`${Math.min(100,Math.round((tI/meta)*100))}%`,"Meta mensual",tI>=meta?"#22c55e":"#f59e0b"]:null].filter(Boolean).map(([v,l,c,big])=>(
+            <div key={l} style={{background:isDark?"rgba(255,255,255,0.04)":"#f8fafc",borderRadius:10,padding:"12px 14px",borderLeft:`3px solid ${c}`}}>
+              <div style={{color:isDark?"#475569":"#94a3b8",fontSize:13}}>{l}</div>
+              <div style={{color:c,fontSize:big?22:18,fontWeight:900,marginTop:2}}>{v}</div>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      {diasArr.length>0&&(
+        <div style={S.sec}>
+          <SL>📅 Días más productivos</SL>
+          {diasArr.slice(0,8).map((d,i)=>(
+            <div key={d.date} style={{display:"flex",alignItems:"center",gap:8,marginBottom:7}}>
+              <span style={{width:96,fontSize:13,color:isDark?"#64748b":"#9ca3af",flexShrink:0}}>#{i+1} {d.label}</span>
+              <div style={{flex:1,height:7,background:isDark?"rgba(255,255,255,0.05)":"#f1f5f9",borderRadius:4,overflow:"hidden"}}><div style={{height:"100%",width:`${(d.monto/maxD)*100}%`,background:empColor,borderRadius:4}} /></div>
+              <div style={{textAlign:"right",minWidth:72}}>
+                <div style={{fontSize:12,fontWeight:700,color:empColor}}>{fmtM(d.monto)}</div>
+                {d.feriado&&<div style={{fontSize:9,color:"#ef4444"}}>feriado</div>}
+                {d.finde&&!d.feriado&&<div style={{fontSize:9,color:"#f59e0b"}}>finde</div>}
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+
+      <div style={S.sec}>
+        <SL>📆 Por día de semana</SL>
+        {DAYS_FULL.map(d=>{
+          const info=bySem[d]; const m=info?.monto||0;
+          return (
+            <div key={d} style={{display:"flex",alignItems:"center",gap:8,marginBottom:7}}>
+              <span style={{width:84,fontSize:13,color:isDark?"#64748b":"#9ca3af"}}>{d.slice(0,3)}</span>
+              <div style={{flex:1,height:7,background:isDark?"rgba(255,255,255,0.05)":"#f1f5f9",borderRadius:4,overflow:"hidden"}}><div style={{height:"100%",width:m?`${(m/maxS)*100}%`:"0%",background:empColor,borderRadius:4}} /></div>
+              <div style={{textAlign:"right",minWidth:80}}>
+                <div style={{fontSize:12,fontWeight:700,color:m>0?empColor:(isDark?"#1e293b":"#e2e8f0")}}>{m>0?fmtM(m):"—"}</div>
+                {info?.count>0&&<div style={{fontSize:9,color:isDark?"#475569":"#9ca3af"}}>{info.count} trab.</div>}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+
+      {srvArr.length>0&&(
+        <div style={S.sec}>
+          <SL>⭐ Servicios del mes</SL>
+          {srvArr.map(([srv,info],i)=>(
+            <div key={srv} style={{display:"flex",alignItems:"center",gap:8,marginBottom:8}}>
+              <span style={{width:120,fontSize:12,color:isDark?"#e2e8f0":"#334155",fontWeight:i===0?800:500,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>#{i+1} {srv}</span>
+              <div style={{flex:1,height:7,background:isDark?"rgba(255,255,255,0.05)":"#f1f5f9",borderRadius:4,overflow:"hidden"}}><div style={{height:"100%",width:`${(info.count/maxSrv)*100}%`,background:empColor,borderRadius:4}} /></div>
+              <div style={{textAlign:"right",minWidth:80}}>
+                <div style={{fontSize:12,fontWeight:700,color:empColor}}>{fmtM(info.monto)}</div>
+                <div style={{fontSize:9,color:isDark?"#475569":"#94a3b8"}}>{info.count}x · {fmtH(info.minutos)}</div>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {insights.length>0&&(
+        <div style={S.sec}>
+          <SL>💡 Conclusiones automáticas</SL>
+          <div style={{display:"flex",flexDirection:"column",gap:8}}>
+            {insights.map((ins,i)=>(
+              <div key={i} style={{display:"flex",gap:10,alignItems:"flex-start",padding:"10px 12px",background:isDark?"rgba(255,255,255,0.03)":"#f8fafc",borderRadius:10,borderLeft:`3px solid ${ins.c}`}}>
+                <span style={{fontSize:16,flexShrink:0}}>{ins.i}</span>
+                <span style={{fontSize:14,color:isDark?"#cbd5e1":"#475569",lineHeight:1.6}}>{ins.t}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ════════ TAB COMPARAR ════════
+function TabVs({anM,anC,cicloActual,cicloCmp,cmpOffset,diaCorte,onSetCmp,empColor,isDark,S}) {
+  const metrics=[
+    {k:"tI",l:"Ingresos totales",f:fmtM,c:empColor,inv:false},
+    {k:"tG",l:"Gastos totales",f:fmtM,c:"#ef4444",inv:true},
+    {k:"bal",l:"Balance neto",f:fmtM,c:"#22c55e",inv:false},
+    {k:"tM",l:"Horas trabajadas",f:fmtH,c:"#818cf8",inv:false},
+    {k:"ph",l:"Valor $/hora",f:v=>v>0?fmtM(Math.round(v)):"—",c:"#34d399",inv:false},
+    {k:"diasT",l:"Días trabajados",f:String,c:"#f97316",inv:false},
+    {k:"promD",l:"Promedio por día",f:v=>fmtM(Math.round(v)),c:"#06b6d4",inv:false},
+    {k:"rachaActual",l:"Racha actual",f:v=>`${v} días`,c:"#f59e0b",inv:false},
+  ];
+  return (
+    <div style={{animation:"slideUp 0.3s ease"}}>
+      <div style={{...S.sec,marginBottom:14}}>
+        <SL>Ciclo de comparación</SL>
+        <div style={{display:"flex",gap:6,flexWrap:"wrap"}}>
+          {[-1,-2,-3,-4,-5,-6].map(o=>{
+            const c=getCiclo(diaCorte,o);
+            return <button key={o} className="tap" onClick={()=>onSetCmp(o)} style={{...S.chipBtn,background:cmpOffset===o?empColor:"transparent",color:cmpOffset===o?"#000":(isDark?"#475569":"#9ca3af"),border:`1px solid ${isDark?"rgba(255,255,255,0.1)":"#e2e8f0"}`}}>{labelCiclo(c)}</button>;
+          })}
+        </div>
+      </div>
+      <div style={S.sec}>
+        <div style={{display:"grid",gridTemplateColumns:"1fr auto 1fr",gap:8,alignItems:"center",marginBottom:16}}>
+          <div style={{textAlign:"center",padding:"8px",background:isDark?"rgba(255,255,255,0.04)":"#f8fafc",borderRadius:10}}>
+            <div style={{fontSize:10,color:isDark?"#475569":"#94a3b8"}}>Comparando</div>
+            <div style={{fontSize:13,fontWeight:900,color:empColor}}>{labelCiclo(cicloCmp)}</div>
+          </div>
+          <div style={{fontSize:16,color:isDark?"#1e3a5f":"#e2e8f0",textAlign:"center"}}>vs</div>
+          <div style={{textAlign:"center",padding:"8px",background:`rgba(${hexRgb(empColor)},0.1)`,borderRadius:10,border:`1px solid ${empColor}33`}}>
+            <div style={{fontSize:10,color:isDark?"#475569":"#94a3b8"}}>Ciclo actual</div>
+            <div style={{fontSize:13,fontWeight:900,color:empColor}}>{labelCiclo(cicloActual)}</div>
+          </div>
+        </div>
+        {metrics.map(({k,l,f,c,inv})=>{
+          const va=anC[k]||0, vb=anM[k]||0, p=pct(vb,va), mv=Math.max(va,vb,1);
+          return (
+            <div key={k} style={{marginBottom:14}}>
+              <div style={{display:"flex",justifyContent:"space-between",fontSize:11,marginBottom:4}}>
+                <span style={{color:isDark?"#64748b":"#94a3b8"}}>{l}</span>
+                <span style={{fontWeight:700,color:arrowClr(p,inv)}}>{arrowPct(p)}</span>
+              </div>
+              <div style={{display:"grid",gridTemplateColumns:"1fr 2px 1fr",gap:6,alignItems:"center"}}>
+                <div style={{textAlign:"right"}}>
+                  <div style={{fontSize:13,fontWeight:700,color:isDark?"#64748b":"#9ca3af"}}>{f(va)}</div>
+                  <div style={{height:5,background:isDark?"rgba(255,255,255,0.04)":"#f1f5f9",borderRadius:3,marginTop:3}}>
+                    <div style={{height:"100%",width:`${(va/mv)*100}%`,background:c,borderRadius:3,opacity:0.4,marginLeft:"auto"}} />
+                  </div>
+                </div>
+                <div style={{height:28,background:isDark?"#1e293b":"#e2e8f0",borderRadius:2}} />
+                <div>
+                  <div style={{fontSize:13,fontWeight:700,color:c}}>{f(vb)}</div>
+                  <div style={{height:5,background:isDark?"rgba(255,255,255,0.04)":"#f1f5f9",borderRadius:3,marginTop:3}}>
+                    <div style={{height:"100%",width:`${(vb/mv)*100}%`,background:c,borderRadius:3}} />
+                  </div>
+                </div>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+      {/* servicios comparados */}
+      {(anM.srvArr.length>0||anC.srvArr.length>0)&&(
+        <div style={{...S.sec,marginTop:14}}>
+          <SL>⭐ Servicios comparados</SL>
+          {Array.from(new Set([...anM.srvArr.map(([s])=>s),...anC.srvArr.map(([s])=>s)])).map(srv=>{
+            const a=anC.srvArr.find(([s])=>s===srv)?.[1]||{count:0,monto:0};
+            const b=anM.srvArr.find(([s])=>s===srv)?.[1]||{count:0,monto:0};
+            const p=pct(b.count,a.count);
+            return (
+              <div key={srv} style={{marginBottom:10,padding:"8px 10px",background:isDark?"rgba(255,255,255,0.03)":"#f8fafc",borderRadius:8}}>
+                <div style={{display:"flex",justifyContent:"space-between",fontSize:13,marginBottom:3}}>
+                  <span style={{color:isDark?"#e2e8f0":"#334155",fontWeight:700}}>{srv}</span>
+                  <span style={{color:arrowClr(p),fontWeight:700,fontSize:12}}>{arrowPct(p)}</span>
+                </div>
+                <div style={{display:"flex",gap:12,fontSize:12}}>
+                  <span style={{color:isDark?"#475569":"#9ca3af"}}>Ant: {a.count}x · {fmtM(a.monto)}</span>
+                  <span style={{color:empColor,fontWeight:700}}>Act: {b.count}x · {fmtM(b.monto)}</span>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ════════ TAB CLIENTES ════════
+function TabClientes({stats,empColor,isDark,S}) {
+  if(stats.length===0) return <Empty icon="👥" t="Sin clientes registrados" s="Agregá el nombre del cliente al registrar un ingreso" />;
+  return (
+    <div style={{animation:"slideUp 0.3s ease"}}>
+      <SL>Clientes frecuentes</SL>
+      <div style={S.list}>
+        {stats.map((c,i)=>(
+          <div key={c.nombre} className="hover-lift" style={S.card}>
+            <div style={{...S.cBar,background:empColor}} />
+            <div style={{width:28,height:28,borderRadius:"50%",background:`rgba(${hexRgb(empColor)},0.15)`,display:"flex",alignItems:"center",justifyContent:"center",fontSize:14,fontWeight:900,color:empColor,flexShrink:0}}>{i+1}</div>
+            <div style={{flex:1,paddingLeft:4}}>
+              <div style={{...S.cTitle,marginBottom:3}}>{c.nombre}</div>
+              <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
+                <Pill l="Total" v={fmtM(c.total)} c={empColor} />
+                <Pill l="Visitas" v={c.count} c="#818cf8" />
+                <Pill l="Última" v={fmtDt(c.ultima)} c="#34d399" />
+              </div>
+              {c.servicios.length>0&&<div style={{fontSize:11,color:isDark?"#475569":"#9ca3af",marginTop:4}}>{c.servicios.slice(0,3).join(", ")}{c.servicios.length>3?" +más":""}</div>}
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+// ════════ TAB CONFIG ════════
+function TabConfig({data,upd,empColor,isDark,S,showToast}) {
+  const [editE,setEditE]=useState(null);
+  return (
+    <div style={{animation:"slideUp 0.3s ease",display:"flex",flexDirection:"column",gap:14}}>
+      <div style={S.sec}>
+        <SL>Mis emprendimientos</SL>
+        <div style={S.list}>
+          {data.emprendimientos.map(e=>(
+            <div key={e.id} style={S.card}>
+              <div style={{...S.cBar,background:e.color}} />
+              <span style={{fontSize:24}}>{EMP_ICONS[e.icon]||"💼"}</span>
+              <div style={{flex:1,paddingLeft:8}}>
+                <div style={{color:isDark?"#fff":"#1e293b",fontWeight:700}}>{e.nombre}</div>
+                <div style={{fontSize:12,color:isDark?"#475569":"#94a3b8"}}>Meta: {e.meta>0?fmtM(e.meta):"Sin meta"}</div>
+                <div style={{display:"flex",gap:4,marginTop:6,flexWrap:"wrap"}}>
+                  {PALETTE.map(c=><button key={c} className="tap" onClick={()=>upd(d=>{d.emprendimientos=d.emprendimientos.map(emp=>emp.id===e.id?{...emp,color:c}:emp);return d;})} style={{width:16,height:16,borderRadius:"50%",background:c,border:e.color===c?"2.5px solid #fff":"2.5px solid transparent",cursor:"pointer",padding:0}} />)}
+                </div>
+              </div>
+              <button className="tap" onClick={()=>setEditE(editE?.id===e.id?null:e)} style={{...S.iBtn,fontSize:16}}>✏️</button>
+            </div>
+          ))}
+        </div>
+        {editE&&(
+          <div style={{marginTop:12,padding:"12px",background:isDark?"rgba(255,255,255,0.03)":"#f8fafc",borderRadius:10}}>
+            <div style={{fontSize:12,color:isDark?"#475569":"#94a3b8",marginBottom:6,fontWeight:700}}>Meta mensual para {editE.nombre}</div>
+            <input type="number" value={editE.meta||""} onChange={e=>setEditE({...editE,meta:parseFloat(e.target.value)||0})} placeholder="Ej: 150000" style={{...S.inp,marginBottom:8}} />
+            <button className="tap" onClick={()=>{upd(d=>{d.emprendimientos=d.emprendimientos.map(emp=>emp.id===editE.id?editE:emp);return d;});setEditE(null);showToast("Guardado ✓");}} style={{...S.btnP,background:empColor,color:"#000",width:"100%"}}>Guardar</button>
+          </div>
+        )}
+      </div>
+
+      <div style={S.sec}>
+        <SL>📅 Día de corte del ciclo</SL>
+        <div style={{fontSize:13,color:isDark?"#64748b":"#94a3b8",marginBottom:10,lineHeight:1.6}}>
+          Elegí el día del mes en que empieza tu ciclo financiero.<br/>
+          <span style={{color:empColor,fontWeight:700}}>Día actual: {data.diaCorte||1}</span> — tu ciclo va del <span style={{fontWeight:700}}>{labelCiclo(getCiclo(data.diaCorte||1,0))}</span>
+        </div>
+        <div style={{display:"flex",gap:6,flexWrap:"wrap",marginBottom:10}}>
+          {[1,5,10,15,20,25].map(d=>(
+            <button key={d} className="tap" onClick={()=>{upd(dt=>{dt.diaCorte=d;return dt;});showToast(`Ciclo: día ${d} de cada mes ✓`);}}
+              style={{...S.chipBtn,background:(data.diaCorte||1)===d?empColor:"transparent",color:(data.diaCorte||1)===d?"#000":(isDark?"#64748b":"#94a3b8"),border:`1px solid ${isDark?"rgba(255,255,255,0.1)":"#e2e8f0"}`}}>
+              Día {d}
+            </button>
+          ))}
+        </div>
+        <div style={{display:"flex",gap:8,alignItems:"center"}}>
+          <input type="number" min="1" max="28" value={data.diaCorte||1} onChange={e=>upd(d=>{d.diaCorte=Math.max(1,Math.min(28,parseInt(e.target.value)||1));return d;})} style={{...S.inp,width:80}} />
+          <span style={{fontSize:12,color:isDark?"#64748b":"#94a3b8"}}>Podés poner cualquier día del 1 al 28</span>
+        </div>
+      </div>
+
+      <div style={S.sec}>
+        <SL>Exportar datos</SL>
+        <button className="tap" onClick={()=>{
+          const rows=[["Fecha","Hora","Servicio","Monto","Duración","Cliente","Nota"],...data.ingresos.map(i=>[i.fecha,i.hora,i.servicio||"",i.monto,i.duracion,i.cliente||"",i.nota||""])];
+          const blob=new Blob([rows.map(r=>r.join(",")).join("\n")],{type:"text/csv"});
+          const a=document.createElement("a");a.href=URL.createObjectURL(blob);a.download=`rendix_ingresos_${new Date().toISOString().slice(0,10)}.csv`;a.click();
+          showToast("Exportado ✓");
+        }} style={{...S.btnP,background:empColor,color:"#000",width:"100%",marginBottom:8}}>📥 Exportar ingresos CSV</button>
+        <button className="tap" onClick={()=>{
+          const rows=[["Fecha","Categoría","Descripción","Monto"],...data.gastos.map(g=>[g.fecha,g.categoria,g.descripcion,g.monto])];
+          const blob=new Blob([rows.map(r=>r.join(",")).join("\n")],{type:"text/csv"});
+          const a=document.createElement("a");a.href=URL.createObjectURL(blob);a.download=`rendix_gastos_${new Date().toISOString().slice(0,10)}.csv`;a.click();
+          showToast("Exportado ✓");
+        }} style={{...S.btnS,width:"100%",marginBottom:8}}>📥 Exportar gastos CSV</button>
+        <button className="tap" onClick={()=>{
+          const json=JSON.stringify(data,null,2);
+          const blob=new Blob([json],{type:"application/json"});
+          const a=document.createElement("a");a.href=URL.createObjectURL(blob);a.download=`rendix_backup_${new Date().toISOString().slice(0,10)}.json`;a.click();
+          showToast("Backup exportado ✓");
+        }} style={{...S.btnS,width:"100%"}}>💾 Backup completo JSON</button>
+      </div>
+
+      <div style={S.sec}>
+        <SL>Importar backup</SL>
+        <label style={{display:"block",padding:"12px",border:`2px dashed ${isDark?"rgba(255,255,255,0.1)":"#e2e8f0"}`,borderRadius:10,textAlign:"center",cursor:"pointer",color:isDark?"#475569":"#94a3b8",fontSize:13}}>
+          📂 Tocá para importar un archivo JSON
+          <input type="file" accept=".json" style={{display:"none"}} onChange={e=>{
+            const f=e.target.files[0]; if(!f) return;
+            const r=new FileReader(); r.onload=ev=>{ try{ const d=JSON.parse(ev.target.result); upd(()=>d); showToast("Backup importado ✓"); }catch{ showToast("Error al importar","warn"); } }; r.readAsText(f);
+          }} />
+        </label>
+      </div>
+
+      <div style={S.sec}>
+        <SL>Cómo instalar como app</SL>
+        <div style={{fontSize:13,color:isDark?"#64748b":"#94a3b8",lineHeight:1.7}}>
+          <div style={{marginBottom:8,padding:"10px",background:isDark?"rgba(255,255,255,0.03)":"#f8fafc",borderRadius:8,borderLeft:`3px solid ${empColor}`}}>
+            <div style={{fontWeight:700,color:isDark?"#e2e8f0":"#334155",marginBottom:4}}>📱 En iPhone/iPad (Safari)</div>
+            Tocá el botón de compartir ↑ → "Agregar a pantalla de inicio"
+          </div>
+          <div style={{marginBottom:8,padding:"10px",background:isDark?"rgba(255,255,255,0.03)":"#f8fafc",borderRadius:8,borderLeft:`3px solid #3b82f6`}}>
+            <div style={{fontWeight:700,color:isDark?"#e2e8f0":"#334155",marginBottom:4}}>🤖 En Android (Chrome)</div>
+            Tocá los tres puntos ⋮ → "Agregar a pantalla de inicio"
+          </div>
+          <div style={{padding:"10px",background:isDark?"rgba(255,255,255,0.03)":"#f8fafc",borderRadius:8,borderLeft:`3px solid #8b5cf6`}}>
+            <div style={{fontWeight:700,color:isDark?"#e2e8f0":"#334155",marginBottom:4}}>💻 En PC/Mac (Chrome/Edge)</div>
+            Buscá el ícono de instalar ⊕ en la barra de direcciones
+          </div>
+        </div>
+      </div>
+
+      <div style={S.sec}>
+        <SL>⚠️ Zona de peligro</SL>
+        <button className="tap" onClick={()=>{if(window.confirm("¿Seguro? Esto borrará TODOS tus datos.")){upd(()=>({...INIT_DATA,onboarded:false}));showToast("Datos borrados","warn");}}} style={{...S.btnS,width:"100%",color:"#ef4444",borderColor:"rgba(239,68,68,0.3)"}}>🗑️ Borrar todos los datos</button>
+      </div>
+    </div>
+  );
+}
+
+// ════════ MODALS ════════
+function ModalIng({onClose,onSave,timerMins,onTimerUsed,isDark,S,empColor,existing}) {
+  const SERVS=["Ventana","Puerta","Reparación","Mantenimiento","Instalación","Uñas gel","Diseño","Limpieza","Costura","Otro"];
+  const [f,setF]=useState(existing||{servicio:"",monto:"",duracion:timerMins>0?String(timerMins):"",hora:new Date().toTimeString().slice(0,5),fecha:todayISO,nota:"",cliente:""});
+  const set=(k,v)=>setF(p=>({...p,[k]:v}));
+  return (
+    <Modal title={existing?"Editar ingreso":"Registrar ingreso"} onClose={onClose} onSave={()=>{if(!f.monto)return;onSave({...f,monto:parseFloat(f.monto)||0,duracion:parseInt(f.duracion)||0});if(timerMins>0&&onTimerUsed)onTimerUsed();}} color="#22c55e" isDark={isDark} S={S}>
+      {timerMins>0&&!existing&&<div style={{background:"rgba(34,197,94,0.1)",border:"1px solid rgba(34,197,94,0.3)",borderRadius:8,padding:"8px 12px",marginBottom:12,fontSize:13,color:"#22c55e"}}>⏱ Se cargaron {fmtH(timerMins)} desde el cronómetro</div>}
+      <SL>Acceso rápido al servicio</SL>
+      <div style={{display:"flex",gap:5,flexWrap:"wrap",marginBottom:12}}>
+        {SERVS.map(s=><button key={s} className="tap" onClick={()=>set("servicio",s)} style={{...S.chipBtn,background:f.servicio===s?"#22c55e":"transparent",color:f.servicio===s?"#000":(isDark?"#64748b":"#94a3b8"),border:`1px solid ${isDark?"rgba(255,255,255,0.1)":"#e2e8f0"}`,fontSize:11}}>{s}</button>)}
+      </div>
+      <FI l="Servicio / Descripción" v={f.servicio} s={v=>set("servicio",v)} p="Detallá el trabajo..." isDark={isDark} S={S} />
+      <FI l="Monto ($) *" t="number" v={f.monto} s={v=>set("monto",v)} p="0" isDark={isDark} S={S} />
+      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}}>
+        <FI l="Duración (min)" t="number" v={f.duracion} s={v=>set("duracion",v)} p="90" isDark={isDark} S={S} />
+        <FI l="Hora" t="time" v={f.hora} s={v=>set("hora",v)} isDark={isDark} S={S} />
+      </div>
+      <FI l="Fecha" t="date" v={f.fecha} s={v=>set("fecha",v)} isDark={isDark} S={S} />
+      {isHol(f.fecha)&&<div style={{background:"rgba(239,68,68,0.1)",border:"1px solid rgba(239,68,68,0.3)",borderRadius:8,padding:"8px 12px",marginBottom:10,fontSize:12,color:"#ef4444"}}>🎉 Esta fecha es feriado nacional</div>}
+      <FI l="Cliente (opcional)" v={f.cliente} s={v=>set("cliente",v)} p="Nombre del cliente" isDark={isDark} S={S} />
+      <FI l="Nota (opcional)" v={f.nota} s={v=>set("nota",v)} p="Observaciones..." isDark={isDark} S={S} />
+    </Modal>
+  );
+}
+
+function ModalGasto({onClose,onSave,isDark,S,existing}) {
+  const [f,setF]=useState(existing||{descripcion:"",monto:"",categoria:"Materiales",fecha:todayISO});
+  const set=(k,v)=>setF(p=>({...p,[k]:v}));
+  return (
+    <Modal title={existing?"Editar gasto":"Registrar gasto"} onClose={onClose} onSave={()=>{if(!f.monto||!f.descripcion)return;onSave({...f,monto:parseFloat(f.monto)||0});}} color="#ef4444" isDark={isDark} S={S}>
+      <SL>Categoría</SL>
+      <div style={{display:"flex",gap:5,flexWrap:"wrap",marginBottom:12}}>
+        {GASTO_CATS.map(c=><button key={c} className="tap" onClick={()=>set("categoria",c)} style={{...S.chipBtn,background:f.categoria===c?"#ef4444":"transparent",color:f.categoria===c?"#fff":(isDark?"#64748b":"#94a3b8"),border:`1px solid ${isDark?"rgba(255,255,255,0.1)":"#e2e8f0"}`}}>{c}</button>)}
+      </div>
+      <FI l="Descripción *" v={f.descripcion} s={v=>set("descripcion",v)} p="¿En qué gastaste?" isDark={isDark} S={S} />
+      <FI l="Monto ($) *" t="number" v={f.monto} s={v=>set("monto",v)} p="0" isDark={isDark} S={S} />
+      <FI l="Fecha" t="date" v={f.fecha} s={v=>set("fecha",v)} isDark={isDark} S={S} />
+    </Modal>
+  );
+}
+
+function ModalEmp({onClose,onSave,isDark,S}) {
+  const [f,setF]=useState({nombre:"",icon:"briefcase",color:"#f59e0b"});
+  const set=(k,v)=>setF(p=>({...p,[k]:v}));
+  return (
+    <Modal title="Nuevo emprendimiento" onClose={onClose} onSave={()=>{if(!f.nombre.trim())return;onSave(f);}} color="#f59e0b" isDark={isDark} S={S}>
+      <FI l="Nombre *" v={f.nombre} s={v=>set("nombre",v)} p="Ej: Aluminio García..." isDark={isDark} S={S} />
+      <SL>Ícono</SL>
+      <div style={{display:"flex",gap:6,flexWrap:"wrap",marginBottom:12}}>
+        {Object.entries(EMP_ICONS).map(([k,v])=><button key={k} className="tap" onClick={()=>set("icon",k)} style={{...S.chipBtn,fontSize:20,background:f.icon===k?"rgba(255,255,255,0.15)":"transparent",border:`1px solid ${f.icon===k?"rgba(255,255,255,0.4)":"rgba(255,255,255,0.1)"}`}}>{v}</button>)}
+      </div>
+      <SL>Color</SL>
+      <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
+        {PALETTE.map(c=><button key={c} className="tap" onClick={()=>set("color",c)} style={{width:28,height:28,borderRadius:"50%",background:c,border:f.color===c?"3px solid #fff":"3px solid transparent",cursor:"pointer",padding:0}} />)}
+      </div>
+    </Modal>
+  );
+}
+
+// ════════ SHARED UI ════════
+function Modal({title,onClose,onSave,children,color,isDark,S}) {
+  return (
+    <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.7)",zIndex:200,display:"flex",alignItems:"flex-end",justifyContent:"center"}} onClick={e=>{if(e.target===e.currentTarget)onClose();}}>
+      <div style={{background:isDark?"#111827":"#fff",borderRadius:"20px 20px 0 0",width:"100%",maxWidth:720,animation:"slideUp 0.25s ease"}}>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"16px 18px 12px",borderBottom:`1px solid ${isDark?"rgba(255,255,255,0.06)":"#f1f5f9"}`}}>
+          <span style={{fontSize:18,fontWeight:800,color:isDark?"#fff":"#1e293b"}}>{title}</span>
+          <button className="tap" onClick={onClose} style={{background:"none",border:"none",color:isDark?"#475569":"#94a3b8",fontSize:18,cursor:"pointer"}}>✕</button>
+        </div>
+        <div style={{padding:"14px 18px",overflowY:"auto",maxHeight:"68vh"}}>{children}</div>
+        <div style={{display:"flex",gap:10,padding:"12px 18px 28px",borderTop:`1px solid ${isDark?"rgba(255,255,255,0.06)":"#f1f5f9"}`}}>
+          <button className="tap" onClick={onClose} style={S.btnS}>Cancelar</button>
+          <button className="tap" onClick={onSave} style={{...S.btnP,background:color,color:color==="#ef4444"?"#fff":"#000"}}>Guardar</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function FI({l,v,s,t="text",p,isDark,S}) {
+  return (
+    <div style={{marginBottom:12}}>
+      <label style={{fontSize:12,color:isDark?"#475569":"#94a3b8",fontWeight:700,textTransform:"uppercase",letterSpacing:0.5,display:"block",marginBottom:6}}>{l}</label>
+      <input type={t} value={v} onChange={e=>s(e.target.value)} placeholder={p} style={S.inp} />
+    </div>
+  );
+}
+
+const SL = ({children}) => <div style={{fontSize:12,fontWeight:800,color:"#64748b",textTransform:"uppercase",letterSpacing:1,marginBottom:10}}>{children}</div>;
+const Empty = ({icon,t,s}) => <div style={{textAlign:"center",padding:"52px 24px"}}><div style={{fontSize:52,marginBottom:14}}>{icon}</div><div style={{fontSize:16,color:"#64748b"}}>{t}</div>{s&&<div style={{fontSize:12,marginTop:6,color:"#475569"}}>{s}</div>}</div>;
+const Pill = ({l,v,c}) => <div style={{display:"inline-flex",alignItems:"center",gap:4,background:`rgba(${hexRgb(c)},0.12)`,borderRadius:8,padding:"4px 8px"}}><span style={{fontSize:12,color:"#64748b"}}>{l}:</span><span style={{fontSize:13,fontWeight:700,color:c}}>{v}</span></div>;
+
+// ════════ DESIGN SYSTEMS ════════
+const base = {
+  fab:{position:"fixed",bottom:22,right:16,width:56,height:56,borderRadius:"50%",border:"none",fontSize:26,fontWeight:900,color:"#000",cursor:"pointer",boxShadow:"0 8px 28px rgba(0,0,0,0.4)",zIndex:100,display:"flex",alignItems:"center",justifyContent:"center"},
+  timerBtn:{padding:"5px 12px",borderRadius:20,border:"none",cursor:"pointer",fontSize:12,fontWeight:700},
+  badge:{padding:"2px 8px",borderRadius:20,fontSize:11,fontWeight:700,color:"#fff"},
+  chipBtn:{padding:"8px 14px",borderRadius:20,cursor:"pointer",fontSize:13,fontWeight:600},
+  empBtn:{fontSize:13,padding:"6px 12px",borderRadius:20,cursor:"pointer",fontWeight:700},
+  iconAction:{background:"rgba(255,255,255,0.06)",border:"1px solid rgba(255,255,255,0.1)",color:"#fff",borderRadius:20,padding:"4px 9px",cursor:"pointer",fontSize:13},
+  mBtn:{border:"none",borderRadius:8,padding:"4px 7px",cursor:"pointer",fontSize:11,whiteSpace:"nowrap"},
+  logoBox:{width:36,height:36,borderRadius:10,display:"flex",alignItems:"center",justifyContent:"center",fontWeight:900,fontSize:17,color:"#000",boxShadow:"0 4px 14px rgba(0,0,0,0.3)",fontFamily:"'Sora',system-ui"},
+};
+
+const DS = {
+  ...base,
+  root:{background:"#080c14",minHeight:"100vh",color:"#e2e8f0",maxWidth:720,margin:"0 auto",position:"relative"},
+  hdr:{background:"#0c1220",padding:"16px 16px 0",borderBottom:"1px solid rgba(255,255,255,0.06)",boxShadow:"0 1px 20px rgba(0,0,0,0.4)"},
+  hdrTop:{display:"flex",justifyContent:"space-between",alignItems:"flex-start",flexWrap:"wrap",gap:8,marginBottom:12},
+  appName:{fontSize:22,fontWeight:900,color:"#f8fafc",letterSpacing:"-0.8px"},
+  appSub:{fontSize:11,color:"#2d3f5a",letterSpacing:"0.3px"},
+  strip:{display:"flex",overflowX:"auto",background:"#0c1220",borderBottom:"1px solid rgba(255,255,255,0.05)"},
+  tabs:{display:"flex",background:"#0c1220",borderBottom:"1px solid rgba(255,255,255,0.05)",position:"sticky",top:0,zIndex:10,overflowX:"auto",boxShadow:"0 4px 12px rgba(0,0,0,0.3)"},
+  tabBtn:{flex:"0 0 auto",padding:"12px 4px",background:"none",border:"none",cursor:"pointer",fontSize:12,display:"flex",flexDirection:"column",alignItems:"center",gap:3,minWidth:56,letterSpacing:"0.3px"},
+  main:{padding:"16px 16px 110px"},
+  dayBanner:{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:14,padding:"14px 16px",background:"linear-gradient(135deg,rgba(255,255,255,0.04),rgba(255,255,255,0.02))",borderRadius:14,border:"1px solid rgba(255,255,255,0.06)"},
+  dayTitle:{fontSize:16,fontWeight:700,color:"#f1f5f9",textTransform:"capitalize",letterSpacing:"-0.2px"},
+  sec:{background:"#0f1826",borderRadius:16,padding:"18px",border:"1px solid rgba(255,255,255,0.05)"},
+  list:{display:"flex",flexDirection:"column",gap:8},
+  card:{background:"#0f1826",borderRadius:13,padding:"14px 14px",display:"flex",alignItems:"center",gap:10,border:"1px solid rgba(255,255,255,0.05)",transition:"transform 0.15s,box-shadow 0.15s,border-color 0.15s"},
+  cBar:{width:3,borderRadius:4,alignSelf:"stretch",flexShrink:0,minHeight:36},
+  cTitle:{color:"#e2e8f0",fontWeight:700,fontSize:16,letterSpacing:"-0.2px"},
+  cMonto:{fontWeight:700,fontSize:15,letterSpacing:"-0.3px",fontFamily:"'JetBrains Mono',monospace"},
+  cMeta:{color:"#2d3f5a",fontSize:13,marginTop:4,letterSpacing:"0.1px"},
+  chip:{color:"#374151",fontSize:11},
+  iBtn:{background:"none",border:"none",color:"#1e3a5f",cursor:"pointer",fontSize:14,padding:"7px 9px",borderRadius:7,flexShrink:0,transition:"color 0.2s,background 0.2s"},
+  barBg:{flex:1,height:8,background:"rgba(255,255,255,0.05)",borderRadius:4,overflow:"hidden"},
+  barFill:{height:"100%",borderRadius:4,transition:"width 0.8s cubic-bezier(0.4,0,0.2,1)"},
+  inp:{width:"100%",background:"rgba(255,255,255,0.04)",border:"1px solid rgba(255,255,255,0.09)",borderRadius:10,padding:"13px 14px",color:"#e2e8f0",fontSize:15,outline:"none",transition:"border-color 0.2s"},
+  btnP:{flex:1,padding:"15px",borderRadius:11,fontWeight:800,border:"none",cursor:"pointer",fontSize:16,letterSpacing:"-0.2px"},
+  btnS:{flex:1,padding:"15px",borderRadius:11,background:"rgba(255,255,255,0.06)",color:"#94a3b8",fontWeight:700,border:"1px solid rgba(255,255,255,0.08)",cursor:"pointer",fontSize:16},
+  toast:{position:"fixed",bottom:90,right:14,padding:"11px 20px",borderRadius:24,fontWeight:700,fontSize:13,zIndex:300,animation:"toastIn 0.3s ease",boxShadow:"0 8px 28px rgba(0,0,0,0.5)",letterSpacing:"-0.2px"},
+};
+
+const LS = {
+  ...DS,
+  root:{...DS.root,background:"#f4f6fa",color:"#1e293b"},
+  hdr:{...DS.hdr,background:"#ffffff",borderBottom:"1px solid #e8ecf2",boxShadow:"0 1px 12px rgba(0,0,0,0.06)"},
+  appName:{...DS.appName,color:"#0f172a"},
+  appSub:{...DS.appSub,color:"#94a3b8"},
+  strip:{...DS.strip,background:"#ffffff",borderBottom:"1px solid #e8ecf2"},
+  tabs:{...DS.tabs,background:"#ffffff",borderBottom:"1px solid #e8ecf2",boxShadow:"0 4px 12px rgba(0,0,0,0.06)"},
+  dayBanner:{...DS.dayBanner,background:"linear-gradient(135deg,#ffffff,#f8fafc)",border:"1px solid #e8ecf2"},
+  dayTitle:{...DS.dayTitle,color:"#0f172a"},
+  sec:{...DS.sec,background:"#ffffff",border:"1px solid #e8ecf2"},
+  card:{...DS.card,background:"#ffffff",border:"1px solid #e8ecf2"},
+  cTitle:{...DS.cTitle,color:"#0f172a"},
+  cMeta:{...DS.cMeta,color:"#94a3b8"},
+  chip:{...DS.chip,color:"#94a3b8"},
+  iBtn:{...DS.iBtn,color:"#cbd5e1"},
+  inp:{...DS.inp,background:"#f8fafc",border:"1px solid #e2e8f0",color:"#0f172a"},
+  btnS:{...DS.btnS,background:"#f1f5f9",color:"#475569",border:"1px solid #e2e8f0"},
+  iconAction:{...base.iconAction,background:"rgba(0,0,0,0.04)",border:"1px solid #e2e8f0",color:"#475569"},
+};
+
+</script>
+</body>
+</html>
