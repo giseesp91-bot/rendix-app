@@ -26,17 +26,7 @@ input[type=time]::-webkit-calendar-picker-indicator{filter:invert(0.5);cursor:po
 <script>
 if('serviceWorker' in navigator) {
   window.addEventListener('load', function() {
-    // Register inline service worker via blob
-    const swCode = `
-      self.addEventListener('install', e => self.skipWaiting());
-      self.addEventListener('activate', e => e.waitUntil(clients.claim()));
-      self.addEventListener('fetch', e => {
-        e.respondWith(fetch(e.request).catch(() => caches.match(e.request)));
-      });
-    `;
-    const blob = new Blob([swCode], {type: 'application/javascript'});
-    const swUrl = URL.createObjectURL(blob);
-    navigator.serviceWorker.register(swUrl, {scope: '/rendix-app/'})
+    navigator.serviceWorker.register('/rendix-app/sw.js', {scope: '/rendix-app/'})
       .then(r => console.log('SW registered'))
       .catch(e => console.log('SW error:', e));
   });
