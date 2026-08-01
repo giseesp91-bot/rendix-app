@@ -523,7 +523,7 @@ function TabGastos({gM,anM,ec,onAdd,onEdit,onDel,C}) {
 }
 
 // ════════ TAB CALENDARIO ════════
-function TabCal({iM,cA,ec,onAddForDate,onEdit,onDel,C}) {
+function TabCal({iM,cA,ec,isDark,onAddForDate,onEdit,onDel,C}) {
   const [sel,setSel]=useState(null);
   const dim=Math.round((cA.fin-cA.ini)/(864e5))+1,fd=cA.ini.getDay();
   const bd={};iM.forEach(i=>{if(!bd[i.fecha])bd[i.fecha]={monto:0,count:0,items:[]};bd[i.fecha].monto+=i.monto;bd[i.fecha].count+=1;bd[i.fecha].items.push(i);});
