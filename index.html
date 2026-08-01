@@ -64,7 +64,7 @@ const uid = () => `r${_id++}`;
 const fmtM = n => "$" + Number(n||0).toLocaleString("es-AR",{minimumFractionDigits:0});
 const fmtH = m => { if(!m) return "—"; const h=Math.floor(m/60),mm=m%60; return h>0?(mm>0?`${h}h ${mm}m`:`${h}h`):`${m}m`; };
 const fmtDt = d => parseLocalDate(d).toLocaleDateString("es-AR",{day:"2-digit",month:"2-digit"});
-const todayISO = new Date().toISOString().slice(0,10);
+const todayISO = (()=>{const d=new Date();return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;})();
 const isoOf = d => d.toISOString().slice(0,10);
 const isHol = d => FERIADOS.has(d);
 const parseLocalDate = ds => { const [y,m,d]=ds.split("-").map(Number); return new Date(y,m-1,d); };
@@ -535,16 +535,16 @@ function TabCal({iM,cA,ec,onAddForDate,onEdit,onDel,C}) {
       React.createElement("div",{style:{display:"grid",gridTemplateColumns:"repeat(7,1fr)",gap:2,marginBottom:8}},
         DAYS_ES.map(d=>React.createElement("div",{key:d,style:{textAlign:"center",fontSize:11,color:"#1e3a5f",padding:"3px 4px",fontWeight:700}},d))
       ),
-      React.createElement("div",{style:{display:"grid",gridTemplateColumns:"repeat(7,1fr)",gap:3}},
+      React.createElement("div",{style:{display:"grid",gridTemplateColumns:"repeat(7,1fr)",gap:2}},
         Array(fd).fill(null).map((_,i)=>React.createElement("div",{key:`e${i}`})),
         Array(dim).fill(null).map((_,i)=>{
           const dd=new Date(cA.ini);dd.setDate(dd.getDate()+i);
           const ds=isoOf(dd),d=bd[ds],fer=isHol(ds),fin2=isWknd(ds),isT=ds===todayISO,isSel=sel===ds;
           const inten=d?Math.max(0.12,d.monto/maxM):0;
-          return React.createElement("div",{key:ds,onClick:()=>setSel(isSel?null:ds),style:{borderRadius:10,padding:"5px 4px",minHeight:54,display:"flex",flexDirection:"column",alignItems:"center",gap:1,cursor:"pointer",background:d?`rgba(${hr(ec)},${inten})`:(fer?"rgba(239,68,68,0.07)":"transparent"),border:isSel?`2px solid ${ec}`:isT?`2px solid rgba(${hr(ec)},0.35)`:"2px solid transparent",transition:"all 0.15s"}},
+          return React.createElement("div",{key:ds,onClick:()=>setSel(isSel?null:ds),style:{borderRadius:10,padding:"5px 4px",minHeight:62,display:"flex",flexDirection:"column",alignItems:"center",gap:1,cursor:"pointer",background:d?`rgba(${hr(ec)},${inten})`:(fer?"rgba(239,68,68,0.07)":"transparent"),border:isSel?`2px solid ${ec}`:isT?`2px solid rgba(${hr(ec)},0.35)`:"2px solid transparent",transition:"all 0.15s"}},
             React.createElement("span",{style:{fontSize:13,fontWeight:d?800:isT?700:400,color:fer?"#ef4444":isT?ec:(fin2?"#334155":"#64748b")}},dd.getDate()),
             fer&&React.createElement("span",{style:{fontSize:8}},"🎉"),
-            d&&React.createElement("span",{style:{fontFamily:"monospace",fontSize:10,color:ec,fontWeight:700}},fmtM(d.monto)),
+            d&&React.createElement("span",{style:{fontFamily:"monospace",fontSize:8,color:ec,fontWeight:700,textAlign:"center",lineHeight:1.1}},fmtM(d.monto)),
             d&&React.createElement("span",{style:{fontSize:9,color:"#334155"}},`${d.count}✓`)
           );
         })
