@@ -15,14 +15,15 @@ Rendix nacio de un problema concreto: mi ciclo de facturacion no arranca el dia 
 - Calendario visual de movimientos
 - Graficos de dona para ver la distribucion de gastos
 - Exportacion a CSV y JSON
-- PWA instalable, mobile-first
+- PWA instalable con service worker, mobile-first
 
 ## Stack
 
-- **Framework:** React
-- **Build:** Vite
-- **Estilos:** CSS3, mobile-first
+- **Frontend:** JavaScript, HTML5, CSS3
+- **PWA:** service worker y manifest propios
 - **Deploy:** GitHub Pages
+
+Este repositorio contiene la version standalone, sin dependencias ni paso de build: se instala como PWA directamente desde el navegador.
 
 ## Sobre el desarrollo
 
