@@ -4,11 +4,12 @@
 <meta charset="UTF-8"/>
 <meta name="viewport" content="width=device-width,initial-scale=1.0,maximum-scale=1.0,user-scalable=no"/>
 <meta name="theme-color" content="#080c14"/>
+<meta name="mobile-web-app-capable" content="yes"/>
 <meta name="apple-mobile-web-app-capable" content="yes"/>
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent"/>
 <meta name="apple-mobile-web-app-title" content="Rendix"/>
-<link rel="apple-touch-icon" href="icon-192.png"/>
-<link rel="icon" type="image/png" href="icon-192.png"/>
+<link rel="apple-touch-icon" href="rendix-apple-touch-icon.png"/>
+<link rel="icon" type="image/png" href="rendix-icon-192.png"/>
 <title>Rendix</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Sora:wght@400;500;600;700;800&display=swap" rel="stylesheet">
@@ -24,21 +25,9 @@ input[type=time]::-webkit-calendar-picker-indicator{filter:invert(0.5);cursor:po
 </style>
 
 <script>
-if('serviceWorker' in navigator) {
-  window.addEventListener('load', function() {
-    // Register inline service worker via blob
-    const swCode = `
-      self.addEventListener('install', e => self.skipWaiting());
-      self.addEventListener('activate', e => e.waitUntil(clients.claim()));
-      self.addEventListener('fetch', e => {
-        e.respondWith(fetch(e.request).catch(() => caches.match(e.request)));
-      });
-    `;
-    const blob = new Blob([swCode], {type: 'application/javascript'});
-    const swUrl = URL.createObjectURL(blob);
-    navigator.serviceWorker.register(swUrl, {scope: '/rendix-app/'})
-      .then(r => console.log('SW registered'))
-      .catch(e => console.log('SW error:', e));
+if ('serviceWorker' in navigator) {
+  window.addEventListener('load', function () {
+    navigator.serviceWorker.register('sw.js').catch(function (e) { console.log('SW error:', e); });
   });
 }
 </script>
