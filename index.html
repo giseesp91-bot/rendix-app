@@ -37,6 +37,10 @@ if ('serviceWorker' in navigator) {
 <!-- React carga primero, luego la app -->
 <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
 <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+<!-- Firebase: cuenta de Google + base de datos en la nube (mismo proyecto que Ginails VIP) -->
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-auth-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore-compat.js"></script>
 <script>
 const { useState, useMemo, useEffect, useRef, useCallback } = React;
 
@@ -62,6 +66,67 @@ const pct = (a,b) => b===0?null:Math.round(((a-b)/b)*100);
 const arrowPct = p => p===null?"—":(p>0?`▲ ${p}%`:(p<0?`▼ ${Math.abs(p)}%`:"→ 0%"));
 const arrowClr = (p,inv=false) => p===null?"#64748b":(p>0?(inv?"#ef4444":"#22c55e"):(p<0?(inv?"#22c55e":"#ef4444"):"#94a3b8"));
 const hr = h => { try{const r=parseInt(h.slice(1,3),16),g=parseInt(h.slice(3,5),16),b=parseInt(h.slice(5,7),16);return `${r},${g},${b}`;}catch{return "245,158,11";} };
+
+// ════════════════════════════════════════════════════════════════════════════
+// NUBE (Firebase)
+// Cada ingreso y cada gasto se guarda como un documento aparte, así Luna puede
+// sumar un ingreso sin tocar el resto. Perfiles, clientes, notas y ajustes van
+// juntos en un documento "main". El localStorage queda como copia en el celu.
+// ════════════════════════════════════════════════════════════════════════════
+firebase.initializeApp({
+  apiKey: "AIzaSyAIV6s4MRQTZHq-dRw-gqBmK4KceUWnY_c",
+  authDomain: "ginails-vip.firebaseapp.com",
+  projectId: "ginails-vip",
+  storageBucket: "ginails-vip.firebasestorage.app",
+  messagingSenderId: "570646656790",
+  appId: "1:570646656790:web:aa743301aa60f2d7e4c237"
+});
+const fauth = firebase.auth();
+const fdb = firebase.firestore();
+fdb.enablePersistence({ synchronizeTabs: true }).catch(() => {});
+
+const nubeRefs = uidUser => {
+  const base = fdb.collection("usuarios").doc(uidUser);
+  return { meta: base.collection("rendix_meta").doc("main"), ing: base.collection("rendix_ing"), gast: base.collection("rendix_gast") };
+};
+// Firestore no acepta "undefined": se limpia pasando por JSON
+const limpio = o => JSON.parse(JSON.stringify(o));
+const metaDe = d => { const { ing, gast, ...m } = d; return limpio(m); };
+const estable = v => {
+  if (v === null || typeof v !== "object") return JSON.stringify(v);
+  if (Array.isArray(v)) return "[" + v.map(estable).join(",") + "]";
+  return "{" + Object.keys(v).sort().filter(k => v[k] !== undefined).map(k => JSON.stringify(k) + ":" + estable(v[k])).join(",") + "}";
+};
+const mapaDe = lista => new Map(lista.map(x => [String(x.id), estable(limpio(x))]));
+const leerLocal = () => { try { const s = localStorage.getItem("rendix_v5"); return s ? JSON.parse(s) : INIT; } catch { return INIT; } };
+
+// Escribe en lotes (Firestore permite hasta 500 operaciones por lote)
+async function escribirLotes(ops) {
+  for (let i = 0; i < ops.length; i += 400) {
+    const b = fdb.batch();
+    ops.slice(i, i + 400).forEach(op => op(b));
+    await b.commit();
+  }
+}
+
+// Sube solo lo que cambió respecto de lo último guardado en la nube
+async function guardarNube(refs, guardado, d) {
+  const ops = [];
+  const m = metaDe(d), ms = estable(m);
+  if (guardado.meta !== ms) { ops.push(b => b.set(refs.meta, m)); guardado.meta = ms; }
+  for (const [lista, col, mapa] of [[d.ing, refs.ing, guardado.ing], [d.gast, refs.gast, guardado.gast]]) {
+    const ids = new Set();
+    for (const x of lista || []) {
+      const id = String(x.id); ids.add(id);
+      const limpioX = limpio(x), js = estable(limpioX);
+      if (mapa.get(id) !== js) { ops.push(b => b.set(col.doc(id), limpioX)); mapa.set(id, js); }
+    }
+    for (const id of Array.from(mapa.keys())) {
+      if (!ids.has(id)) { ops.push(b => b.delete(col.doc(id))); mapa.delete(id); }
+    }
+  }
+  if (ops.length) await escribirLotes(ops);
+}
 
 const getCiclo = (dc,off=0) => {
   const hoy=new Date(),d=dc||1;
@@ -111,8 +176,10 @@ function Area({data,color}) {
 }
 
 // ════════════════════════════════════════════════════════════════════════════
-function App() {
+function App({user}) {
   const [data,setData]=useState(()=>{try{const s=localStorage.getItem("rendix_v5");return s?JSON.parse(s):INIT;}catch{return INIT;}});
+  const [nube,setNube]=useState("cargando"); // cargando | lista | error
+  const nubeRef=useRef({listo:false,refs:null,guardado:{meta:null,ing:new Map(),gast:new Map()}});
   const [tab,setTab]=useState("inicio");
   const [modal,setModal]=useState(null);
   const [editItem,setEditItem]=useState(null);
@@ -124,6 +191,73 @@ function App() {
   const timerRef=useRef(null);
 
   useEffect(()=>{try{localStorage.setItem("rendix_v5",JSON.stringify(data));}catch{}},[data]);
+
+  // ── Nube: carga inicial, subida de datos del dispositivo y actualización en vivo ──
+  useEffect(()=>{
+    let cancelado=false; const desuscribir=[];
+    const n=nubeRef.current; n.listo=false; n.refs=nubeRefs(user.uid);
+    (async()=>{
+      try{
+        const r=n.refs;
+        const [mS,iS,gS]=await Promise.all([r.meta.get(),r.ing.get(),r.gast.get()]);
+        if(cancelado) return;
+        const local=leerLocal();
+        const tieneLocal=(local.ing||[]).length>0||(local.gast||[]).length>0||!!local.onboarded;
+        if(tieneLocal){try{localStorage.setItem("rendix_v5_respaldo",JSON.stringify(local));}catch{}}
+
+        if(!mS.exists){
+          // Cuenta nueva en la nube: si este dispositivo tiene datos, se suben todos
+          if(tieneLocal){
+            n.guardado={meta:null,ing:new Map(),gast:new Map()};
+            await guardarNube(r,n.guardado,local);
+            showToast(`Subí ${(local.ing||[]).length} ingresos y ${(local.gast||[]).length} gastos a tu cuenta ☁️`);
+          }
+          setData(local);
+        }else{
+          const nubeData={...INIT,...mS.data(),ing:iS.docs.map(x=>x.data()),gast:gS.docs.map(x=>x.data())};
+          n.guardado={meta:estable(metaDe(nubeData)),ing:mapaDe(nubeData.ing),gast:mapaDe(nubeData.gast)};
+          // ¿Este dispositivo tiene movimientos que no están en la nube?
+          const faltIng=(local.ing||[]).filter(i=>!n.guardado.ing.has(String(i.id)));
+          const faltGast=(local.gast||[]).filter(g=>!n.guardado.gast.has(String(g.id)));
+          if((faltIng.length||faltGast.length)&&window.confirm(`Este dispositivo tiene ${faltIng.length} ingresos y ${faltGast.length} gastos que no están en tu cuenta. ¿Los subo?\n\n(Si decís que no, quedan guardados como respaldo en este dispositivo.)`)){
+            nubeData.ing=[...nubeData.ing,...faltIng]; nubeData.gast=[...nubeData.gast,...faltGast];
+            await guardarNube(r,n.guardado,nubeData);
+          }
+          setData(nubeData);
+        }
+        if(cancelado) return;
+        n.listo=true; setNube("lista");
+
+        // En vivo: cambios desde otro dispositivo o desde Luna
+        desuscribir.push(r.meta.onSnapshot(s=>{
+          if(s.metadata.hasPendingWrites||!s.exists) return;
+          const m=s.data(); n.guardado.meta=estable(limpio(m));
+          setData(d=>({...INIT,...m,ing:d.ing,gast:d.gast}));
+        }));
+        desuscribir.push(r.ing.onSnapshot(q=>{
+          if(q.metadata.hasPendingWrites) return;
+          const lista=q.docs.map(x=>x.data()); n.guardado.ing=mapaDe(lista);
+          setData(d=>({...d,ing:lista}));
+        }));
+        desuscribir.push(r.gast.onSnapshot(q=>{
+          if(q.metadata.hasPendingWrites) return;
+          const lista=q.docs.map(x=>x.data()); n.guardado.gast=mapaDe(lista);
+          setData(d=>({...d,gast:lista}));
+        }));
+      }catch(e){
+        console.error("Rendix nube",e);
+        if(!cancelado){setNube("error");showToast("Sin conexión con la nube: guardo en el dispositivo","warn");}
+      }
+    })();
+    return()=>{cancelado=true;nubeRef.current.listo=false;desuscribir.forEach(f=>f());};
+  },[user.uid]);
+
+  // ── Nube: guardar solo lo que cambió ──
+  useEffect(()=>{
+    const n=nubeRef.current;
+    if(!n.listo) return;
+    guardarNube(n.refs,n.guardado,data).catch(e=>{console.error("Rendix guardar",e);showToast("No pude guardar en la nube","warn");});
+  },[data]);
   const showToast=(msg,type="ok")=>{setToast({msg,type});setTimeout(()=>setToast(null),2600);};
   const upd=useCallback(fn=>setData(p=>({...p,...fn({...p})})),[]);
   const emp=data.emps.find(e=>e.id===data.activeEmp)||data.emps[0];
@@ -723,6 +857,7 @@ function TabConfig({data,upd,ec,showToast,cA,C,isDark}) {
       React.createElement("div",{style:{fontSize:11,color:"#334155",fontWeight:700,textTransform:"uppercase",letterSpacing:1,marginBottom:12}},"Exportar datos"),
       [["📥 Ingresos CSV",()=>{const rows=[["Fecha","Hora","Servicio","Monto","Duración","Cliente","Nota"],...data.ing.map(i=>[i.fecha,i.hora,i.servicio||"",i.monto,i.duracion,i.cliente||"",i.nota||""])];const b=new Blob([rows.map(r=>r.join(",")).join("\n")],{type:"text/csv"});const a=document.createElement("a");a.href=URL.createObjectURL(b);a.download="rendix_ingresos.csv";a.click();showToast("Exportado ✓");}],
        ["📥 Gastos CSV",()=>{const rows=[["Fecha","Categoría","Descripción","Monto"],...data.gast.map(g=>[g.fecha,g.categoria,g.descripcion,g.monto])];const b=new Blob([rows.map(r=>r.join(",")).join("\n")],{type:"text/csv"});const a=document.createElement("a");a.href=URL.createObjectURL(b);a.download="rendix_gastos.csv";a.click();showToast("Exportado ✓");}],
+       [`🚪 Cerrar sesión (${fauth.currentUser?.email||""})`,()=>{if(window.confirm("¿Cerrar sesión? Tus datos quedan guardados en tu cuenta."))fauth.signOut();}],
        ["💾 Backup JSON",()=>{const b=new Blob([JSON.stringify(data,null,2)],{type:"application/json"});const a=document.createElement("a");a.href=URL.createObjectURL(b);a.download="rendix_backup.json";a.click();showToast("Backup exportado ✓");}]
       ].map(([l,fn])=>React.createElement("button",{key:l,onClick:fn,style:{width:"100%",padding:"12px",borderRadius:12,background:"rgba(255,255,255,0.05)",color:"#e2e8f0",fontWeight:700,border:"1px solid rgba(255,255,255,0.07)",cursor:"pointer",fontSize:14,marginBottom:8,textAlign:"left",fontFamily:"inherit"}},l)),
       React.createElement("label",{style:{display:"block",padding:"12px",border:"2px dashed rgba(255,255,255,0.08)",borderRadius:12,textAlign:"center",cursor:"pointer",color:"#334155",fontSize:13}},
@@ -910,7 +1045,38 @@ function TabVs({anM,anC,cA,cC,cmpOff,onSetCmp,dc,ec,C,isDark}) {
   );
 }
 
-ReactDOM.createRoot(document.getElementById('root')).render(React.createElement(App));
+// ── Ingreso con Google ──
+function Login(){
+  const [error,setError]=useState("");
+  const [cargando,setCargando]=useState(false);
+  const entrar=async()=>{
+    setError("");setCargando(true);
+    const prov=new firebase.auth.GoogleAuthProvider();
+    try{ await fauth.signInWithPopup(prov); }
+    catch(e){
+      if(e.code==="auth/popup-blocked"||e.code==="auth/operation-not-supported-in-this-environment"){ await fauth.signInWithRedirect(prov); return; }
+      if(e.code!=="auth/popup-closed-by-user"&&e.code!=="auth/cancelled-popup-request") setError("No pude ingresar: "+(e.message||e.code));
+    }
+    setCargando(false);
+  };
+  return React.createElement("div",{style:{minHeight:"100vh",display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",padding:24,gap:18,color:"#e2e8f0",textAlign:"center"}},
+    React.createElement("img",{src:"rendix-icon-192.png",alt:"",style:{width:84,height:84,borderRadius:22}}),
+    React.createElement("div",{style:{fontSize:28,fontWeight:800}},"Rendix"),
+    React.createElement("div",{style:{fontSize:14,color:"#64748b",lineHeight:1.6,maxWidth:300}},"Ingresá con tu cuenta de Google para que tus datos queden guardados en la nube y sincronizados entre tus dispositivos."),
+    React.createElement("button",{onClick:entrar,disabled:cargando,style:{marginTop:8,padding:"14px 22px",borderRadius:14,border:"none",background:"#f59e0b",color:"#080c14",fontWeight:800,fontSize:15,cursor:"pointer",opacity:cargando?0.6:1}},cargando?"Ingresando…":"Ingresar con Google"),
+    error&&React.createElement("div",{style:{fontSize:12,color:"#ef4444",maxWidth:300}},error)
+  );
+}
+
+function Root(){
+  const [user,setUser]=useState(undefined);
+  useEffect(()=>fauth.onAuthStateChanged(u=>setUser(u||null)),[]);
+  if(user===undefined) return React.createElement("div",{style:{minHeight:"100vh",display:"flex",alignItems:"center",justifyContent:"center",color:"#64748b"}},"Cargando…");
+  if(!user) return React.createElement(Login);
+  return React.createElement(App,{user,key:user.uid});
+}
+
+ReactDOM.createRoot(document.getElementById('root')).render(React.createElement(Root));
 
 </script>
 </body>

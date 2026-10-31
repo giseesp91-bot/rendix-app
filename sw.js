@@ -2,7 +2,7 @@
 // Estrategia: primero red, y si no hay conexión usa lo guardado.
 // Así las actualizaciones aparecen apenas subís un index.html nuevo,
 // y la app sigue abriendo sin internet.
-const CACHE = 'rendix-v1';
+const CACHE = 'rendix-v2';
 const SHELL = ['./', './index.html', './manifest.json', './rendix-icon-192.png', './rendix-icon-512.png'];
 
 self.addEventListener('install', (e) => {
@@ -19,6 +19,9 @@ self.addEventListener('activate', (e) => {
 
 self.addEventListener('fetch', (e) => {
   if (e.request.method !== 'GET') return;
+  // La nube (Firebase / Google) se deja pasar directo: no se guarda en caché
+  const host = new URL(e.request.url).hostname;
+  if (/googleapis\.com$|firebaseapp\.com$|firebaseio\.com$|google\.com$|identitytoolkit/.test(host)) return;
   e.respondWith(
     fetch(e.request)
       .then((res) => {
