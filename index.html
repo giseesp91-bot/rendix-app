@@ -52,6 +52,34 @@ const GASTO_CATS = ["Materiales","Herramientas","Transporte","Publicidad","Servi
 const EMP_ICONS = {"💼":"Maletín","🪟":"Ventana","💅":"Uñas","🧵":"Costura","🎂":"Repostería","🧹":"Limpieza","💇":"Peluquería","🐾":"Mascotas","🍽️":"Comida","🌿":"Plantas","🚗":"Auto","💻":"Tech","👗":"Ropa","🎨":"Arte","🔧":"Herrería","📸":"Foto","🌸":"Flores","🧴":"Belleza","🏋️":"Fitness","✂️":"Corte"};
 const PALETTE = ["#f59e0b","#ef4444","#8b5cf6","#3b82f6","#10b981","#ec4899","#f97316","#06b6d4","#84cc16","#e11d48","#a78bfa","#34d399"];
 
+// ── Categorías de ingreso ────────────────────────────────────────────────────
+// El campo "categoria" del ingreso usa exactamente estos 4 nombres (Luna también).
+const CATS_ING = [
+  {k:"Uñas",     ic:"💅", c:"#ec4899", kw:["capping","kaping","kapping","semi","soft gel","softgel","polygel","esmalt","uña"]},
+  {k:"Facial",   ic:"✨", c:"#a78bfa", kw:["limpieza","peeling","lifting","perfilado","laminado","facial"]},
+  {k:"Corporal", ic:"💆", c:"#06b6d4", kw:["masaje","piedras","drenaje","corporal"]},
+  {k:"Mely",     ic:"🧵", c:"#10b981", kw:["mely"]},
+];
+// minúsculas y sin tildes, pero conserva la ñ (así "uña" no se confunde con el artículo "una")
+const sinTildes = s => String(s==null?"":s).toLowerCase().replace(/ñ/g,"\u0001").normalize("NFD").replace(/[\u0300-\u036f]/g,"").replace(/\u0001/g,"ñ");
+// para buscar: además la ñ cuenta como n, así "unas" encuentra "uñas"
+const normBusq = s => sinTildes(s).replace(/ñ/g,"n").replace(/\s+/g," ").trim();
+// categorías que podrían corresponder a un servicio, según su nombre (0, 1 o varias)
+const candidatosCat = srv => {
+  const t = sinTildes(srv);
+  if(!t.trim()) return [];
+  if(t.includes("mely")) return ["Mely"];
+  return CATS_ING.filter(c=>c.k!=="Mely"&&c.kw.some(w=>t.includes(w))).map(c=>c.k);
+};
+const canonCat = v => { if(!v) return ""; const t=normBusq(v); const c=CATS_ING.find(x=>normBusq(x.k)===t); return c?c.k:String(v); };
+const catInfo = k => CATS_ING.find(c=>c.k===k)||{k,ic:"🏷️",c:"#94a3b8"};
+// categoría que se muestra: la guardada, o la deducida del nombre (sin guardar) si hay una sola posible
+const catEfectiva = i => {
+  if(i.categoria) return {k:canonCat(i.categoria),guardada:true};
+  const c = candidatosCat(i.servicio);
+  return c.length===1 ? {k:c[0],guardada:false} : {k:"",guardada:false,dudas:c};
+};
+
 let _id = Date.now();
 const uid = () => `r${_id++}`;
 const fmtM = n => "$" + Number(n||0).toLocaleString("es-AR",{minimumFractionDigits:0});
@@ -189,6 +217,8 @@ function App({user}) {
   const [toast,setToast]=useState(null);
   const [timer,setTimer]=useState({running:false,elapsed:0});
   const timerRef=useRef(null);
+  const [ficha,setFicha]=useState(null); // clienta abierta en la ficha (solo pantalla)
+  const [busq,setBusq]=useState({q:"",cat:"todas",rango:"ciclo",desde:"",hasta:"",rev:false,pag:1}); // filtros del buscador (solo pantalla)
 
   useEffect(()=>{try{localStorage.setItem("rendix_v5",JSON.stringify(data));}catch{}},[data]);
 
@@ -278,6 +308,10 @@ function App({user}) {
   const iCmp=useMemo(()=>data.ing.filter(i=>i.empId===data.activeEmp&&inR(i.fecha,cC)),[data,cC]);
   const gCmp=useMemo(()=>data.gast.filter(g=>g.empId===data.activeEmp&&inR(g.fecha,cC)),[data,cC]);
   const iHoy=useMemo(()=>data.ing.filter(i=>i.fecha===todayISO&&i.empId===data.activeEmp),[data]);
+  const ingActivo=useMemo(()=>data.ing.filter(i=>i.empId===data.activeEmp),[data.ing,data.activeEmp]);
+  const abrirFicha=n=>setFicha(n);
+  const abrirEdit=i=>{setEditItem(i);setModal("editIng");};
+  const borrarIng=id=>{if(!window.confirm("¿Seguro que querés eliminar este ingreso?"))return;upd(d=>{d.ing=d.ing.filter(i=>i.id!==id);return d;});showToast("Eliminado","warn");};
 
   const calc=(ing,gast)=>{
     const tI=ing.reduce((s,i)=>s+i.monto,0),tG=gast.reduce((s,g)=>s+g.monto,0),tM=ing.reduce((s,i)=>s+i.duracion,0);
@@ -400,7 +434,8 @@ function App({user}) {
           React.createElement("div",{style:{fontSize:11,color:"#334155"}},cOff===0?"Ciclo actual":cOff===-1?"Ciclo anterior":`Hace ${Math.abs(cOff)} ciclos`)
         ),
         React.createElement("button",{onClick:()=>setCOff(o=>Math.min(0,o+1)),style:{background:"none",border:"none",color:cOff===0?"#1e293b":"#64748b",cursor:"pointer",fontSize:20,padding:"0 4px",opacity:cOff===0?0.15:1}},"›"),
-        cOff!==0&&React.createElement("button",{onClick:()=>setCOff(0),style:{fontSize:11,color:ec,background:`rgba(${hr(ec)},0.15)`,border:"none",borderRadius:10,padding:"3px 4px",cursor:"pointer",fontWeight:700}},"Hoy")
+        cOff!==0&&React.createElement("button",{onClick:()=>setCOff(0),style:{fontSize:11,color:ec,background:`rgba(${hr(ec)},0.15)`,border:"none",borderRadius:10,padding:"3px 4px",cursor:"pointer",fontWeight:700}},"Hoy"),
+        React.createElement("button",{onClick:()=>setTab(tab==="buscar"?"inicio":"buscar"),title:"Buscar","aria-label":"Buscar",style:{background:tab==="buscar"?`rgba(${hr(ec)},0.22)`:"none",border:"none",borderRadius:10,fontSize:18,padding:"3px 8px",cursor:"pointer"}},"🔍")
       ),
       // meta bar
       emp?.meta>0&&React.createElement("div",null,
@@ -438,12 +473,13 @@ function App({user}) {
 
     // MAIN CONTENT
     React.createElement("main",{style:{padding:"0 4px"}},
-      tab==="inicio"&&React.createElement(TabInicio,{iHoy,iM,anM,anC,ec,areaD,proj,onAdd:()=>setModal("ing"),onEdit:i=>{setEditItem(i);setModal("editIng");},onDel:id=>{if(!window.confirm("¿Seguro que querés eliminar este ingreso?"))return;upd(d=>{d.ing=d.ing.filter(i=>i.id!==id);return d;});showToast("Eliminado","warn");},notaHoy:data.notas?.[todayISO]||"",onNota:v=>upd(d=>{d.notas={...d.notas,[todayISO]:v};return d;}),C}),
+      tab==="inicio"&&React.createElement(TabInicio,{onCliente:abrirFicha,iHoy,iM,anM,anC,ec,areaD,proj,onAdd:()=>setModal("ing"),onEdit:i=>{setEditItem(i);setModal("editIng");},onDel:id=>{if(!window.confirm("¿Seguro que querés eliminar este ingreso?"))return;upd(d=>{d.ing=d.ing.filter(i=>i.id!==id);return d;});showToast("Eliminado","warn");},notaHoy:data.notas?.[todayISO]||"",onNota:v=>upd(d=>{d.notas={...d.notas,[todayISO]:v};return d;}),C}),
       tab==="gastos"&&React.createElement(TabGastos,{gM,anM,ec,onAdd:()=>setModal("gast"),onEdit:g=>{setEditItem(g);setModal("editGast");},onDel:id=>{if(!window.confirm("¿Seguro que querés eliminar este gasto?"))return;upd(d=>{d.gast=d.gast.filter(g=>g.id!==id);return d;});showToast("Eliminado","warn");},C}),
-      tab==="cal"&&React.createElement(TabCal,{iM,cA,ec,onAddForDate:ds=>{setPrefillDate(ds);setModal("ing");},onEdit:i=>{setEditItem(i);setModal("editIng");},onDel:id=>{if(!window.confirm("¿Seguro que querés eliminar este ingreso?"))return;upd(d=>{d.ing=d.ing.filter(i=>i.id!==id);return d;});showToast("Eliminado","warn");},C}),
+      tab==="cal"&&React.createElement(TabCal,{onCliente:abrirFicha,isDark,iM,cA,ec,onAddForDate:ds=>{setPrefillDate(ds);setModal("ing");},onEdit:i=>{setEditItem(i);setModal("editIng");},onDel:id=>{if(!window.confirm("¿Seguro que querés eliminar este ingreso?"))return;upd(d=>{d.ing=d.ing.filter(i=>i.id!==id);return d;});showToast("Eliminado","warn");},C}),
       tab==="stats"&&React.createElement(TabStats,{anM,anC,iM,cA,ec,meta:emp?.meta||0,proj,cmpOff,onSetCmp:setCmpOff,dc,cC,C,semana:semanaData,isDark}),
       tab==="config"&&React.createElement(TabConfig,{data,upd,ec,showToast,cA,C}),
-      tab==="clientes"&&React.createElement(TabClientes,{stats:clientesStats,ec,C,isDark}),
+      tab==="clientes"&&React.createElement(TabClientes,{stats:clientesStats,ec,C,isDark,onFicha:abrirFicha}),
+      tab==="buscar"&&React.createElement(TabBuscar,{ing:ingActivo,cA,ec,C,isDark,busq,setBusq,onEdit:abrirEdit,onDel:borrarIng,onCliente:abrirFicha,upd,showToast}),
       tab==="vs"&&React.createElement(TabVs,{anM,anC,cA,cC,cmpOff,onSetCmp:setCmpOff,dc,ec,C,isDark})
     ),
 
@@ -461,6 +497,9 @@ function App({user}) {
         );
       })
     ),
+
+    // FICHA DE CLIENTA (pantalla encima de todo; no se guarda en la nube)
+    ficha&&React.createElement(FichaClienta,{key:"ficha",nombre:ficha,ing:ingActivo,ec,C,isDark,onClose:()=>setFicha(null),onEdit:abrirEdit,onDel:borrarIng}),
 
     // MODALS
     modal==="ing"&&React.createElement(MIng,{prefillDate,onClose:()=>{setModal(null);setPrefillDate(null);},onSave:item=>{upd(d=>{d.ing=[...d.ing,{...item,id:uid(),empId:d.activeEmp}];return d;});setModal(null);setPrefillDate(null);showToast("Ingreso registrado ✓");},timerMins:timer.elapsed>0?Math.round(timer.elapsed/60):0,onTimerUsed:resetT,ec}),
@@ -490,7 +529,7 @@ function Onboard({onDone}) {
 }
 
 // ════════ TAB INICIO ════════
-function TabInicio({iHoy,iM,anM,anC,ec,areaD,proj,onAdd,onEdit,onDel,notaHoy,onNota,C}) {
+function TabInicio({iHoy,iM,anM,anC,ec,areaD,proj,onAdd,onEdit,onDel,notaHoy,onNota,C,onCliente}) {
   const [ne,setNe]=useState(false);
   const [nv,setNv]=useState(notaHoy);
   const tH=iHoy.reduce((s,i)=>s+i.monto,0),mH=iHoy.reduce((s,i)=>s+i.duracion,0);
@@ -514,7 +553,7 @@ function TabInicio({iHoy,iM,anM,anC,ec,areaD,proj,onAdd,onEdit,onDel,notaHoy,onN
       ),
       iHoy.length===0
         ?React.createElement("div",{style:{textAlign:"center",padding:"10px 4px",color:"#1e3a5f",fontSize:13}},"Sin ingresos hoy — tocá ＋ para agregar")
-        :React.createElement("div",{style:{display:"flex",flexDirection:"column",gap:6}},iHoy.sort((a,b)=>b.hora.localeCompare(a.hora)).map(i=>React.createElement(IC,{key:i.id,item:i,ec,onDel,onEdit,compact:true})))
+        :React.createElement("div",{style:{display:"flex",flexDirection:"column",gap:6}},iHoy.sort((a,b)=>b.hora.localeCompare(a.hora)).map(i=>React.createElement(IC,{key:i.id,item:i,ec,onDel,onEdit,onCliente,compact:true})))
     ),
 
     // STATS ROW
@@ -562,14 +601,14 @@ function TabInicio({iHoy,iM,anM,anC,ec,areaD,proj,onAdd,onEdit,onDel,notaHoy,onN
     iM.length>0&&React.createElement("div",null,
       React.createElement("div",{style:{fontSize:11,color:"#334155",fontWeight:700,textTransform:"uppercase",letterSpacing:0.5,marginBottom:10}},`Ingresos del ciclo — ${iM.length} registros`),
       React.createElement("div",{style:{display:"flex",flexDirection:"column",gap:8}},
-        [...iM].sort((a,b)=>b.fecha.localeCompare(a.fecha)||b.hora.localeCompare(a.hora)).map(i=>React.createElement(IC,{key:i.id,item:i,ec,onDel,onEdit,showDate:true}))
+        [...iM].sort((a,b)=>b.fecha.localeCompare(a.fecha)||b.hora.localeCompare(a.hora)).map(i=>React.createElement(IC,{key:i.id,item:i,ec,onDel,onEdit,onCliente,showDate:true}))
       )
     )
   );
 }
 
 // ════════ INGRESO CARD ════════
-function IC({item,ec,onDel,onEdit,showDate,compact}) {
+function IC({item,ec,onDel,onEdit,showDate,compact,onCliente}) {
   const fer=isHol(item.fecha),fin=isWknd(item.fecha);
   return React.createElement("div",{style:{background:compact?"rgba(0,0,0,0.18)":"rgba(255,255,255,0.04)",borderRadius:14,padding:compact?"10px 12px":"13px 14px",display:"flex",alignItems:"center",gap:6,border:"1px solid rgba(255,255,255,0.05)"}},
     React.createElement("div",{style:{width:3,borderRadius:4,alignSelf:"stretch",background:ec,flexShrink:0,minHeight:24}}),
@@ -577,7 +616,10 @@ function IC({item,ec,onDel,onEdit,showDate,compact}) {
       React.createElement("div",{style:{display:"flex",justifyContent:"space-between",gap:6,alignItems:"flex-start"}},
         React.createElement("div",{style:{minWidth:0}},
           React.createElement("span",{style:{color:"#e2e8f0",fontWeight:700,fontSize:15}},item.servicio||"Trabajo"),
-          item.cliente&&React.createElement("span",{style:{color:"#334155",fontSize:12}},` · ${item.cliente}`),
+          React.createElement(CatChip,{item,onClick:onEdit}),
+          item.cliente&&(onCliente
+            ?React.createElement("button",{onClick:()=>onCliente(item.cliente),title:"Ver ficha de la clienta",style:{background:"none",border:"none",padding:0,cursor:"pointer",color:"#64748b",fontSize:12,fontFamily:"inherit",textDecoration:"underline",textDecorationColor:"rgba(100,116,139,0.45)"}},` · ${item.cliente}`)
+            :React.createElement("span",{style:{color:"#334155",fontSize:12}},` · ${item.cliente}`)),
           fer&&React.createElement("span",{style:{color:"#ef4444",fontSize:11}}," 🎉"),
           fin&&!fer&&React.createElement("span",{style:{color:"#f59e0b",fontSize:11}}," 📅")
         ),
@@ -646,7 +688,7 @@ function TabGastos({gM,anM,ec,onAdd,onEdit,onDel,C}) {
 }
 
 // ════════ TAB CALENDARIO ════════
-function TabCal({iM,cA,ec,isDark,onAddForDate,onEdit,onDel,C}) {
+function TabCal({iM,cA,ec,isDark,onAddForDate,onEdit,onDel,C,onCliente}) {
   const [sel,setSel]=useState(null);
   const dim=Math.round((cA.fin-cA.ini)/(864e5))+1,fd=cA.ini.getDay();
   const bd={};iM.forEach(i=>{if(!bd[i.fecha])bd[i.fecha]={monto:0,count:0,items:[]};bd[i.fecha].monto+=i.monto;bd[i.fecha].count+=1;bd[i.fecha].items.push(i);});
@@ -682,7 +724,7 @@ function TabCal({iM,cA,ec,isDark,onAddForDate,onEdit,onDel,C}) {
         React.createElement("button",{onClick:()=>onAddForDate(sel),style:{background:ec,color:"#000",border:"none",borderRadius:12,padding:"9px 4px",fontWeight:700,cursor:"pointer",fontSize:14,fontFamily:"inherit"}},"＋ Agregar")
       ),
       selD
-        ?React.createElement("div",{style:{display:"flex",flexDirection:"column",gap:8}},selD.items.map(i=>React.createElement(IC,{key:i.id,item:i,ec,onDel,onEdit,compact:true})))
+        ?React.createElement("div",{style:{display:"flex",flexDirection:"column",gap:8}},selD.items.map(i=>React.createElement(IC,{key:i.id,item:i,ec,onDel,onEdit,onCliente,compact:true})))
         :React.createElement("div",{style:{color:"#1e3a5f",fontSize:13,textAlign:"center",padding:"10px 4px"}},"Sin ingresos este día — tocá Agregar")
     )
   );
@@ -889,13 +931,34 @@ function TabConfig({data,upd,ec,showToast,cA,C,isDark}) {
 function MIng({onClose,onSave,ec,timerMins,onTimerUsed,existing,prefillDate}) {
   const SERVS=["Ventana","Puerta","Reparación","Uñas gel","Diseño","Mantenimiento","Limpieza","Costura","Otro"];
   const [f,setF]=useState(existing||{servicio:"",monto:"",duracion:timerMins>0?String(timerMins):"",hora:new Date().toTimeString().slice(0,5),fecha:prefillDate||todayISO,nota:"",cliente:""});
+  const [catTocada,setCatTocada]=useState(!!existing);
   const s=(k,v)=>setF(p=>({...p,[k]:v}));
-  return React.createElement(Modal,{title:existing?"Editar ingreso":"Registrar ingreso",onClose,onSave:()=>{if(!f.monto)return;onSave({...f,monto:parseFloat(f.monto)||0,duracion:parseInt(f.duracion)||0});if(timerMins>0&&onTimerUsed)onTimerUsed();},color:"#22c55e",ec},
+  // Categoría: la guardada; y solo en ingresos NUEVOS, mientras no la toques, la que sugiere el nombre del servicio.
+  // En un ingreso viejo sin categoría la sugerencia se ve con borde punteado y NO se guarda hasta que la toques.
+  const cand=candidatosCat(f.servicio);
+  const auto=(!existing&&!catTocada&&cand.length===1)?cand[0]:"";
+  const catSel=f.categoria?canonCat(f.categoria):auto;
+  const sugVieja=(existing&&!existing.categoria)?catEfectiva(existing):null;
+  const elegir=k=>{setCatTocada(true);setF(p=>({...p,categoria:(canonCat(p.categoria)===k||(!p.categoria&&auto===k))?"":k}));};
+  return React.createElement(Modal,{title:existing?"Editar ingreso":"Registrar ingreso",onClose,onSave:()=>{if(!f.monto)return;const out={...f,monto:parseFloat(f.monto)||0,duracion:parseInt(f.duracion)||0};const fin=f.categoria?canonCat(f.categoria):auto;if(fin)out.categoria=fin;else delete out.categoria;onSave(out);if(timerMins>0&&onTimerUsed)onTimerUsed();},color:"#22c55e",ec},
     timerMins>0&&!existing&&React.createElement("div",{style:{background:"rgba(34,197,94,0.1)",border:"1px solid rgba(34,197,94,0.25)",borderRadius:10,padding:"9px 4px",marginBottom:12,fontSize:13,color:"#22c55e"}},`⏱ Se cargaron ${fmtH(timerMins)} del cronómetro`),
     prefillDate&&React.createElement("div",{style:{background:`rgba(${hr(ec)},0.1)`,border:`1px solid rgba(${hr(ec)},0.25)`,borderRadius:10,padding:"9px 4px",marginBottom:12,fontSize:13,color:ec}},`📅 ${parseLocalDate(prefillDate).toLocaleDateString("es-AR",{weekday:"long",day:"numeric",month:"long"})}`),
     React.createElement(FI,{l:"Servicio",v:f.servicio,s:v=>s("servicio",v),p:"Detallá el trabajo..."}),
     React.createElement("div",{style:{display:"flex",gap:6,flexWrap:"wrap",marginBottom:12}},
       SERVS.map(sv=>React.createElement("button",{key:sv,onClick:()=>s("servicio",sv),style:{padding:"6px 4px",borderRadius:20,cursor:"pointer",fontSize:12,fontWeight:700,background:f.servicio===sv?ec:"rgba(255,255,255,0.06)",color:f.servicio===sv?"#000":"#475569",border:"none",fontFamily:"inherit"}},sv))
+    ),
+    React.createElement("div",{style:{marginBottom:12}},
+      React.createElement("label",{style:{fontSize:11,color:"#334155",fontWeight:700,textTransform:"uppercase",letterSpacing:0.5,display:"block",marginBottom:5}},"Categoría"),
+      React.createElement("div",{style:{display:"flex",gap:6,flexWrap:"wrap"}},
+        CATS_ING.map(c=>{
+          const sel=catSel===c.k;
+          const sug=!sel&&sugVieja&&(sugVieja.k===c.k||(sugVieja.dudas||[]).includes(c.k));
+          return React.createElement("button",{key:c.k,type:"button",onClick:()=>elegir(c.k),style:{padding:"8px 11px",borderRadius:20,cursor:"pointer",fontSize:13,fontWeight:700,fontFamily:"inherit",background:sel?c.c:"rgba(255,255,255,0.06)",color:sel?"#000":(sug?c.c:"#475569"),border:sug?`1.5px dashed ${c.c}`:"1px solid transparent"}},`${c.ic} ${c.k}`);
+        })
+      ),
+      sugVieja&&!f.categoria&&(sugVieja.k
+        ?React.createElement("div",{style:{fontSize:11,color:"#64748b",marginTop:6}},`Sugerida por el nombre del servicio: ${sugVieja.k}. Tocala para confirmarla.`)
+        :(sugVieja.dudas&&sugVieja.dudas.length>1?React.createElement("div",{style:{fontSize:11,color:"#f59e0b",marginTop:6}},`Puede ser ${sugVieja.dudas.join(" o ")}: elegí vos.`):null))
     ),
     React.createElement(FI,{l:"Monto ($) *",t:"number",v:f.monto,s:v=>s("monto",v),p:"0"}),
     React.createElement("div",{style:{display:"grid",gridTemplateColumns:"1fr 1fr",gap:6}},
@@ -962,16 +1025,244 @@ function FI({l,v,s,t="text",p}) {
 }
 
 
+// ════════ CATEGORÍA (etiqueta en cada ingreso) ════════
+// Guardada: relleno de color. Sugerida por el nombre del servicio (sin guardar): borde punteado y "?".
+function CatChip({item,onClick}) {
+  const h=React.createElement;
+  const e=catEfectiva(item);
+  const base={marginLeft:6,padding:"1px 6px",borderRadius:10,fontSize:10,fontWeight:700,fontFamily:"inherit",cursor:onClick?"pointer":"default",verticalAlign:"middle"};
+  if(e.k){
+    const c=catInfo(e.k);
+    return h("button",{onClick:ev=>{ev.stopPropagation();if(onClick)onClick(item);},title:e.guardada?"Categoría":"Sugerida por el nombre del servicio. Tocá para elegir la definitiva.",style:{...base,background:e.guardada?`rgba(${hr(c.c)},0.16)`:"transparent",color:c.c,border:e.guardada?`1px solid rgba(${hr(c.c)},0.35)`:`1px dashed ${c.c}`}},`${c.ic} ${e.k}${e.guardada?"":" ?"}`);
+  }
+  if(e.dudas&&e.dudas.length>1) return h("button",{onClick:ev=>{ev.stopPropagation();if(onClick)onClick(item);},title:"El nombre encaja en más de una categoría. Tocá para elegir.",style:{...base,background:"transparent",color:"#f59e0b",border:"1px dashed #f59e0b"}},`¿${e.dudas.join(" o ")}?`);
+  return null;
+}
+
+// ════════ BUSCADOR ════════
+function TabBuscar(props) {
+  return props.busq.rev
+    ? React.createElement(RevisarCats,{ing:props.ing,ec:props.ec,C:props.C,isDark:props.isDark,onBack:()=>props.setBusq(b=>({...b,rev:false})),upd:props.upd,showToast:props.showToast,onEdit:props.onEdit})
+    : React.createElement(BuscarVista,props);
+}
+
+function BuscarVista({ing,cA,ec,C,isDark,busq,setBusq,onEdit,onDel,onCliente}) {
+  const h=React.createElement;
+  const tx=isDark?"#e2e8f0":"#1e293b", sub="#64748b";
+  const set=p=>setBusq(b=>({...b,pag:1,...p}));
+  const fechaLarga=s=>s.split("-").reverse().join("/");
+
+  const res=useMemo(()=>{
+    let d0=null,d1=null;
+    if(busq.rango==="ciclo"){d0=cA.desde;d1=cA.hasta;}
+    else if(busq.rango==="fechas"){d0=busq.desde||"0000-01-01";d1=busq.hasta||"9999-12-31";if(d0>d1){const t=d0;d0=d1;d1=t;}}
+    const pal=normBusq(busq.q).split(" ").filter(Boolean);
+    return ing.filter(i=>{
+      const f=i.fecha||"";
+      if(d0!==null&&(f<d0||f>d1)) return false;
+      if(busq.cat!=="todas"){
+        const k=catEfectiva(i).k;
+        if(busq.cat==="sin"){ if(k) return false; } else if(k!==busq.cat) return false;
+      }
+      if(pal.length){
+        const t=normBusq((i.servicio||"")+" "+(i.cliente||"")+" "+(i.nota||""));
+        if(!pal.every(w=>t.includes(w))) return false;
+      }
+      return true;
+    }).sort((a,b)=>(b.fecha||"").localeCompare(a.fecha||"")||(b.hora||"").localeCompare(a.hora||""));
+  },[ing,busq.q,busq.cat,busq.rango,busq.desde,busq.hasta,cA.desde,cA.hasta]);
+
+  const pend=useMemo(()=>ing.filter(i=>!i.categoria&&candidatosCat(i.servicio).length>0).length,[ing]);
+
+  const n=res.length;
+  const total=res.reduce((s,i)=>s+(Number(i.monto)||0),0);
+  const mins=res.reduce((s,i)=>s+(Number(i.duracion)||0),0);
+  const prom=n?Math.round(total/n):0;
+  const sugeridas=res.filter(i=>!i.categoria&&catEfectiva(i).k).length;
+
+  const partes=[];
+  if(busq.q.trim()) partes.push(`"${busq.q.trim()}"`);
+  partes.push(busq.rango==="ciclo"?`Ciclo ${lblCiclo(cA)}`:busq.rango==="todo"?"Todo el historial":`${busq.desde?fechaLarga(busq.desde):"…"} → ${busq.hasta?fechaLarga(busq.hasta):"…"}`);
+  if(busq.cat!=="todas") partes.push(busq.cat==="sin"?"Sin categoría":busq.cat);
+
+  const inp={width:"100%",background:isDark?"rgba(255,255,255,0.05)":"#ffffff",border:C.bdr,borderRadius:12,padding:"12px 10px",color:tx,fontSize:15,outline:"none",fontFamily:"inherit",colorScheme:isDark?"dark":"light"};
+  const seg=(act)=>({flex:1,padding:"9px 4px",borderRadius:10,border:"none",cursor:"pointer",fontSize:13,fontWeight:700,fontFamily:"inherit",background:act?ec:(isDark?"rgba(255,255,255,0.06)":"#eef1f6"),color:act?"#000":sub});
+  const chip=(act,col)=>({flexShrink:0,padding:"7px 11px",borderRadius:20,cursor:"pointer",fontSize:12,fontWeight:700,fontFamily:"inherit",background:act?(col||ec):(isDark?"rgba(255,255,255,0.06)":"#eef1f6"),color:act?"#000":sub,border:"none"});
+  const stat=(l,v,c)=>h("div",{key:l,style:{background:isDark?"rgba(255,255,255,0.04)":"#f6f8fb",borderRadius:12,padding:"10px 8px",minWidth:0}},
+    h("div",{style:{fontSize:10,color:"#334155",textTransform:"uppercase",letterSpacing:0.5,marginBottom:4}},l),
+    h("div",{style:{fontFamily:"monospace",fontSize:16,fontWeight:700,color:c}},v));
+
+  return h("div",{style:{display:"flex",flexDirection:"column",gap:8}},
+    // caja de búsqueda
+    h("div",{style:{position:"relative"}},
+      h("input",{type:"text",value:busq.q,onChange:e=>set({q:e.target.value}),placeholder:"Buscar servicio, clienta o nota…",autoFocus:true,autoCapitalize:"none",enterKeyHint:"search","aria-label":"Buscar",style:{...inp,paddingRight:40}}),
+      busq.q&&h("button",{onClick:()=>set({q:""}),"aria-label":"Borrar búsqueda",style:{position:"absolute",right:6,top:6,width:32,height:32,borderRadius:10,border:"none",background:"transparent",color:sub,fontSize:16,cursor:"pointer"}},"✕")
+    ),
+    // rango de fechas
+    h("div",{style:{display:"flex",gap:6}},
+      [["ciclo","Este ciclo"],["todo","Todo"],["fechas","Fechas"]].map(([k,l])=>h("button",{key:k,onClick:()=>set({rango:k}),style:seg(busq.rango===k)},l))
+    ),
+    busq.rango==="ciclo"&&h("div",{style:{fontSize:11,color:sub,textAlign:"center"}},`Ciclo ${lblCiclo(cA)}`),
+    busq.rango==="fechas"&&h("div",{style:{display:"grid",gridTemplateColumns:"1fr 1fr",gap:6}},
+      h("div",null,h("div",{style:{fontSize:10,color:"#334155",fontWeight:700,textTransform:"uppercase",marginBottom:4}},"Desde"),h("input",{type:"date",value:busq.desde,onChange:e=>set({desde:e.target.value}),"aria-label":"Desde",style:inp})),
+      h("div",null,h("div",{style:{fontSize:10,color:"#334155",fontWeight:700,textTransform:"uppercase",marginBottom:4}},"Hasta"),h("input",{type:"date",value:busq.hasta,onChange:e=>set({hasta:e.target.value}),"aria-label":"Hasta",style:inp}))
+    ),
+    // categorías (solo para filtrar)
+    h("div",{style:{display:"flex",gap:6,overflowX:"auto",paddingBottom:2}},
+      h("button",{onClick:()=>set({cat:"todas"}),style:chip(busq.cat==="todas")},"Todas"),
+      CATS_ING.map(c=>h("button",{key:c.k,onClick:()=>set({cat:c.k}),style:chip(busq.cat===c.k,c.c)},`${c.ic} ${c.k}`)),
+      h("button",{onClick:()=>set({cat:"sin"}),style:chip(busq.cat==="sin","#94a3b8")},"Sin categoría")
+    ),
+    // aviso de categorías viejas sin confirmar
+    pend>0&&h("button",{onClick:()=>set({rev:true}),style:{textAlign:"left",background:"rgba(245,158,11,0.10)",border:"1px dashed #f59e0b",borderRadius:12,padding:"10px 10px",color:"#f59e0b",fontSize:12,fontWeight:700,cursor:"pointer",fontFamily:"inherit"}},`📋 ${pend} ingresos viejos tienen una categoría sugerida sin confirmar · Revisar`),
+    // resumen del resultado
+    h("div",{style:{background:C.card,border:C.bdr,borderRadius:16,padding:"12px 8px"}},
+      h("div",{style:{fontSize:11,color:sub,marginBottom:8,lineHeight:1.4}},partes.join(" · ")),
+      h("div",{style:{display:"grid",gridTemplateColumns:"1fr 1fr",gap:6}},
+        stat("Cantidad",String(n),ec),
+        stat("Total",fmtM(total),"#22c55e"),
+        stat("Horas",mins>0?fmtH(mins):"—","#818cf8"),
+        stat("Promedio por servicio",n?fmtM(prom):"—","#f59e0b")
+      ),
+      busq.cat!=="todas"&&busq.cat!=="sin"&&sugeridas>0&&h("div",{style:{fontSize:11,color:"#f59e0b",marginTop:8}},`Incluye ${sugeridas} con categoría sugerida (todavía sin confirmar).`)
+    ),
+    // lista
+    n===0
+      ?h("div",{style:{textAlign:"center",padding:"28px 8px",color:sub,fontSize:14}},"No encontré ingresos con ese filtro.")
+      :h("div",{style:{display:"flex",flexDirection:"column",gap:8}},
+        res.slice(0,busq.pag*40).map(i=>h(IC,{key:i.id,item:i,ec,onDel,onEdit,onCliente,showDate:true})),
+        res.length>busq.pag*40&&h("button",{onClick:()=>set({pag:busq.pag+1}),style:{padding:"12px",borderRadius:12,border:C.bdr,background:"transparent",color:sub,fontWeight:700,fontSize:13,cursor:"pointer",fontFamily:"inherit"}},`Ver más (${res.length-busq.pag*40} restantes)`)
+      )
+  );
+}
+
+// ════════ REVISAR CATEGORÍAS VIEJAS ════════
+// Nada se guarda solo: cada botón guarda UN ingreso, y "Aplicar sugeridas" pide confirmación antes.
+function RevisarCats({ing,ec,C,isDark,onBack,upd,showToast,onEdit}) {
+  const h=React.createElement;
+  const tx=isDark?"#e2e8f0":"#1e293b", sub="#64748b";
+  const [pag,setPag]=useState(1);
+  const info=useMemo(()=>ing.filter(i=>!i.categoria)
+    .sort((a,b)=>(b.fecha||"").localeCompare(a.fecha||"")||(b.hora||"").localeCompare(a.hora||""))
+    .map(i=>({i,e:catEfectiva(i)})),[ing]);
+  const unicas=info.filter(x=>x.e.k);
+  const dudosas=info.filter(x=>!x.e.k&&x.e.dudas&&x.e.dudas.length>1);
+  const sin=info.length-unicas.length-dudosas.length;
+
+  const poner=(id,k)=>upd(d=>{d.ing=d.ing.map(i=>String(i.id)===String(id)?{...i,categoria:k}:i);return d;});
+  const aplicar=()=>{
+    if(!unicas.length) return;
+    const por={}; unicas.forEach(x=>{por[x.e.k]=(por[x.e.k]||0)+1;});
+    const detalle=CATS_ING.filter(c=>por[c.k]).map(c=>`${c.ic} ${c.k}: ${por[c.k]}`).join("\n");
+    const ok=window.confirm(`Voy a guardar la categoría sugerida en ${unicas.length} ingresos:\n\n${detalle}\n\nLos ${dudosas.length+sin} restantes (con duda o sin sugerencia) no se tocan.\n\n¿Confirmás?`);
+    if(!ok) return;
+    const mapa=new Map(unicas.map(x=>[String(x.i.id),x.e.k]));
+    upd(d=>{d.ing=d.ing.map(i=>(mapa.has(String(i.id))&&!i.categoria)?{...i,categoria:mapa.get(String(i.id))}:i);return d;});
+    showToast(`Guardé ${unicas.length} categorías ✓`);
+  };
+
+  return h("div",{style:{display:"flex",flexDirection:"column",gap:8}},
+    h("div",{style:{display:"flex",alignItems:"center",gap:8}},
+      h("button",{onClick:onBack,"aria-label":"Volver",style:{width:38,height:38,borderRadius:12,border:C.bdr,background:"transparent",color:tx,fontSize:18,cursor:"pointer"}},"←"),
+      h("div",null,h("div",{style:{fontSize:16,fontWeight:800,color:tx}},"Revisar categorías"),h("div",{style:{fontSize:11,color:sub}},`${info.length} ingresos sin categoría guardada`))
+    ),
+    h("div",{style:{background:C.card,border:C.bdr,borderRadius:16,padding:"12px 8px",fontSize:12,color:sub,lineHeight:1.5}},
+      "Elegí la categoría de cada uno (se guarda al tocar). El borde punteado marca la que sugiere el nombre del servicio."),
+    unicas.length>0&&h("button",{onClick:aplicar,style:{padding:"13px",borderRadius:12,border:"none",background:ec,color:"#000",fontWeight:800,fontSize:14,cursor:"pointer",fontFamily:"inherit"}},`Aplicar las ${unicas.length} sugeridas`),
+    (dudosas.length+sin>0)&&unicas.length>0&&h("div",{style:{fontSize:11,color:sub,textAlign:"center"}},`${dudosas.length} con duda y ${sin} sin sugerencia: esos los elegís vos.`),
+    info.length===0&&h("div",{style:{textAlign:"center",padding:"28px 8px",color:sub,fontSize:14}},"✅ Todos los ingresos tienen categoría."),
+    info.slice(0,pag*30).map(({i,e})=>h("div",{key:i.id,style:{background:C.card,border:C.bdr,borderRadius:14,padding:"10px 8px"}},
+      h("div",{style:{display:"flex",justifyContent:"space-between",gap:6}},
+        h("div",{style:{minWidth:0}},
+          h("div",{style:{color:tx,fontWeight:700,fontSize:14}},i.servicio||"Trabajo"),
+          h("div",{style:{fontSize:11,color:sub,marginTop:2}},`${fmtDt(i.fecha)}${i.cliente?" · "+i.cliente:""}${i.nota?" · "+i.nota:""}`)
+        ),
+        h("span",{style:{fontFamily:"monospace",color:"#22c55e",fontWeight:700,fontSize:14,flexShrink:0}},fmtM(i.monto))
+      ),
+      h("div",{style:{display:"flex",gap:6,flexWrap:"wrap",marginTop:8}},
+        CATS_ING.map(c=>{
+          const sug=e.k===c.k||(e.dudas&&e.dudas.includes(c.k));
+          return h("button",{key:c.k,onClick:()=>poner(i.id,c.k),style:{padding:"7px 10px",borderRadius:20,cursor:"pointer",fontSize:12,fontWeight:700,fontFamily:"inherit",background:sug?`rgba(${hr(c.c)},0.12)`:"transparent",color:sug?c.c:sub,border:sug?`1.5px dashed ${c.c}`:`1px solid ${isDark?"rgba(255,255,255,0.12)":"#d8dee8"}`}},`${c.ic} ${c.k}`);
+        })
+      ),
+      (!e.k&&e.dudas&&e.dudas.length>1)&&h("div",{style:{fontSize:11,color:"#f59e0b",marginTop:6}},`Puede ser ${e.dudas.join(" o ")}: elegí vos.`),
+      (!e.k&&(!e.dudas||e.dudas.length===0))&&h("div",{style:{fontSize:11,color:sub,marginTop:6}},"Sin sugerencia: elegí vos.")
+    )),
+    info.length>pag*30&&h("button",{onClick:()=>setPag(p=>p+1),style:{padding:"12px",borderRadius:12,border:C.bdr,background:"transparent",color:sub,fontWeight:700,fontSize:13,cursor:"pointer",fontFamily:"inherit"}},`Ver más (${info.length-pag*30} restantes)`)
+  );
+}
+
+// ════════ FICHA DE CLIENTA ════════
+// Pantalla encima de todo (no cambia de pestaña). Junta las visitas aunque el nombre esté escrito distinto en mayúsculas o tildes.
+function FichaClienta({nombre,ing,ec,C,isDark,onClose,onEdit,onDel}) {
+  const h=React.createElement;
+  const tx=isDark?"#e2e8f0":"#1e293b", sub="#64748b";
+  const clave=normBusq(nombre);
+  const visitas=useMemo(()=>ing.filter(i=>i.cliente&&normBusq(i.cliente)===clave)
+    .sort((a,b)=>(b.fecha||"").localeCompare(a.fecha||"")||(b.hora||"").localeCompare(a.hora||"")),[ing,clave]);
+  const total=visitas.reduce((s,i)=>s+(Number(i.monto)||0),0);
+  const ultima=visitas.length?visitas[0].fecha:"";
+  const dias=ultima?Math.round((parseLocalDate(todayISO)-parseLocalDate(ultima))/864e5):null;
+  const hace=dias===null?"":dias===0?"hoy":dias===1?"ayer":dias>1?`hace ${dias} días`:"";
+  const svc=useMemo(()=>{
+    const m=new Map();
+    visitas.forEach(i=>{
+      const k=normBusq(i.servicio||"")||"sin nombre";
+      const e=m.get(k)||{n:0,t:0,nombres:{}};
+      e.n++; e.t+=Number(i.monto)||0;
+      const nm=(i.servicio||"Sin especificar").trim(); e.nombres[nm]=(e.nombres[nm]||0)+1;
+      m.set(k,e);
+    });
+    return [...m.values()].map(e=>({nombre:Object.entries(e.nombres).sort((a,b)=>b[1]-a[1])[0][0],n:e.n,t:e.t})).sort((a,b)=>b.n-a.n||b.t-a.t);
+  },[visitas]);
+  const variantes=[...new Set(visitas.map(i=>String(i.cliente).trim()))].filter(v=>v!==String(nombre).trim());
+  const maxN=svc.length?svc[0].n:1;
+  const card=(l,v,c,s)=>h("div",{key:l,style:{background:C.card,border:C.bdr,borderRadius:14,padding:"10px 8px",minWidth:0}},
+    h("div",{style:{fontSize:10,color:"#334155",textTransform:"uppercase",letterSpacing:0.5,marginBottom:4}},l),
+    h("div",{style:{fontFamily:"monospace",fontSize:15,fontWeight:700,color:c}},v),
+    s&&h("div",{style:{fontSize:10,color:sub,marginTop:2}},s));
+
+  return h("div",{style:{position:"fixed",inset:0,zIndex:150,background:C.bg,overflowY:"auto",padding:"44px 4px 60px",fontFamily:"'Sora',system-ui,sans-serif",color:tx}},
+    h("div",{style:{display:"flex",alignItems:"center",gap:8,marginBottom:10}},
+      h("button",{onClick:onClose,"aria-label":"Cerrar ficha",style:{width:40,height:40,borderRadius:12,border:C.bdr,background:"transparent",color:tx,fontSize:20,cursor:"pointer",flexShrink:0}},"←"),
+      h("div",{style:{minWidth:0}},
+        h("div",{style:{fontSize:11,color:sub,textTransform:"uppercase",letterSpacing:0.6}},"Ficha de clienta"),
+        h("div",{style:{fontSize:22,fontWeight:800,color:tx,overflow:"hidden",textOverflow:"ellipsis"}},nombre))
+    ),
+    visitas.length===0
+      ?h("div",{style:{textAlign:"center",padding:"40px 8px",color:sub,fontSize:14}},"No encontré visitas de esta clienta.")
+      :h("div",{style:{display:"flex",flexDirection:"column",gap:8}},
+        h("div",{style:{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:6}},
+          card("Total gastado",fmtM(total),"#22c55e"),
+          card("Visitas",String(visitas.length),ec),
+          card("Última visita",fmtDt(ultima),"#818cf8",hace)
+        ),
+        h("div",{style:{background:C.card,border:C.bdr,borderRadius:16,padding:"12px 8px"}},
+          h("div",{style:{fontSize:11,color:"#334155",fontWeight:700,textTransform:"uppercase",letterSpacing:0.5,marginBottom:10}},"Lo que más se hace"),
+          svc.slice(0,5).map(s=>h("div",{key:s.nombre,style:{marginBottom:9}},
+            h("div",{style:{display:"flex",justifyContent:"space-between",gap:6,fontSize:13,marginBottom:4}},
+              h("span",{style:{color:tx,fontWeight:700,minWidth:0}},s.nombre),
+              h("span",{style:{color:sub,flexShrink:0}},`×${s.n} · ${fmtM(s.t)}`)),
+            h("div",{style:{height:6,background:"rgba(255,255,255,0.06)",borderRadius:3,overflow:"hidden"}},h("div",{style:{height:"100%",width:`${(s.n/maxN)*100}%`,background:ec,borderRadius:3}}))
+          ))
+        ),
+        variantes.length>0&&h("div",{style:{fontSize:11,color:sub,lineHeight:1.5}},`Incluye visitas escritas de otra forma: ${variantes.join(", ")}.`),
+        h("div",{style:{fontSize:11,color:"#334155",fontWeight:700,textTransform:"uppercase",letterSpacing:0.5,marginTop:4}},`Todas las visitas (${visitas.length})`),
+        h("div",{style:{display:"flex",flexDirection:"column",gap:8}},visitas.map(i=>h(IC,{key:i.id,item:i,ec,onDel,onEdit,showDate:true})))
+      )
+  );
+}
+
 // ════════ TAB CLIENTES ════════
-function TabClientes({stats,ec,C,isDark}) {
+function TabClientes({stats,ec,C,isDark,onFicha}) {
   if(stats.length===0) return React.createElement("div",{style:{textAlign:"center",padding:"52px 4px"}},
     React.createElement("div",{style:{fontSize:48,marginBottom:12}},"👥"),
     React.createElement("div",{style:{fontSize:15,color:"#334155"}},"Sin clientes registrados"),
     React.createElement("div",{style:{fontSize:12,marginTop:6,color:"#1e3a5f"}},"Agregá el nombre del cliente al registrar un ingreso")
   );
   return React.createElement("div",{style:{display:"flex",flexDirection:"column",gap:8}},
-    React.createElement("div",{style:{fontSize:11,color:"#334155",fontWeight:700,textTransform:"uppercase",letterSpacing:0.5,marginBottom:4}},`${stats.length} clientes frecuentes`),
-    stats.map((c,i)=>React.createElement("div",{key:c.nombre,style:{background:C.card,borderRadius:14,padding:"11px 4px",display:"flex",alignItems:"center",gap:6,border:C.bdr}},
+    React.createElement("div",{style:{fontSize:11,color:"#334155",fontWeight:700,textTransform:"uppercase",letterSpacing:0.5,marginBottom:4}},`${stats.length} clientes frecuentes · tocá una para ver su ficha`),
+    stats.map((c,i)=>React.createElement("div",{key:c.nombre,onClick:()=>onFicha&&onFicha(c.nombre),style:{background:C.card,borderRadius:14,padding:"11px 4px",display:"flex",alignItems:"center",gap:6,border:C.bdr,cursor:"pointer"}},
       React.createElement("div",{style:{width:36,height:36,borderRadius:"50%",background:`rgba(${hr(ec)},0.15)`,display:"flex",alignItems:"center",justifyContent:"center",fontSize:14,fontWeight:900,color:ec,flexShrink:0}},i+1),
       React.createElement("div",{style:{flex:1}},
         React.createElement("div",{style:{color:"#e2e8f0",fontWeight:700,fontSize:15}},c.nombre),
