@@ -80,6 +80,52 @@ const catEfectiva = i => {
   return c.length===1 ? {k:c[0],guardada:false} : {k:"",guardada:false,dudas:c};
 };
 
+// ── Pagos del ingreso ────────────────────────────────────────────────────────
+// Campo OPCIONAL "pagos": lista de {monto, medio:"efectivo"|"transferencia", fecha:"AAAA-MM-DD"}.
+//  · sin el campo (ingresos viejos y los que carga Luna) → se considera cobrado, medio sin indicar.
+//  · pagos:[]  → todavía no pagó nada ("paga después").
+// "monto" del ingreso NO cambia: es el valor del servicio. Lo cobrado y lo que falta se calculan acá.
+const MEDIOS = [
+  {k:"efectivo",      ic:"💵", l:"Efectivo",      c:"#22c55e"},
+  {k:"transferencia", ic:"🏦", l:"Transferencia", c:"#38bdf8"},
+];
+const canonMedio = v => {
+  const t = normBusq(v);
+  if(t.includes("efect")) return "efectivo";
+  if(t.includes("transf")||t.includes("banco")||t.includes("mercado")||t==="mp"||t.includes("cbu")||t.includes("alias")) return "transferencia";
+  return t||"otro";
+};
+const medioInfo = k => MEDIOS.find(m=>m.k===canonMedio(k))||{k:canonMedio(k),ic:"💳",l:String(k||"Otro"),c:"#94a3b8"};
+const estadoPago = i => {
+  const total = Number(i.monto)||0;
+  if(!Array.isArray(i.pagos)) return {definido:false,total,pagado:total,saldo:0,estado:"sin-dato",medios:[],porMedio:{}};
+  const porMedio = {};
+  let pagado = 0;
+  i.pagos.forEach(p=>{const m=Number(p&&p.monto)||0; if(m>0){pagado+=m; const k=canonMedio(p.medio); porMedio[k]=(porMedio[k]||0)+m;}});
+  const saldo = Math.max(0,total-pagado);
+  const estado = saldo>0 ? (pagado>0?"parcial":"debe") : "pagado";
+  return {definido:true,total,pagado,saldo,estado,medios:Object.keys(porMedio),porMedio};
+};
+// devuelve el ingreso con la lista de pagos nueva (undefined = volver a "sin indicar": se saca el campo)
+const conPagos = (i,pagos) => { const o={...i}; if(pagos===undefined) delete o.pagos; else o.pagos=pagos; return o; };
+
+// ── Categorías de gastos editables (una lista por perfil) ────────────────────
+// Se guardan en los ajustes como data.catsGasto = { <idPerfil>: ["Luz","Alquiler",...] }.
+// Sin lista guardada se usan las de siempre (GASTO_CATS). El campo "categoria" de cada gasto sigue siendo texto.
+const PAL_GASTOS = ["#ef4444","#f97316","#f59e0b","#818cf8","#ec4899","#10b981","#38bdf8","#a78bfa","#84cc16","#e11d48"];
+const SUGERIDAS_GASTO = ["Luz","Agua","Gas","Internet","Suscripciones","Comisiones","Sueldos","Mantenimiento"];
+// lista guardada (o la de siempre) + las categorías que estén en uso en algún gasto y no figuren: nunca se pierde una
+const catsGastoDe = (guardada, gastosDelPerfil) => {
+  const base = (Array.isArray(guardada)&&guardada.length) ? guardada.map(String) : GASTO_CATS;
+  const vistas = new Set(base.map(normBusq));
+  const extra = [];
+  (gastosDelPerfil||[]).forEach(g=>{
+    const c=String(g.categoria||"").trim();
+    if(c&&!vistas.has(normBusq(c))){ vistas.add(normBusq(c)); extra.push(c); }
+  });
+  return [...base,...extra];
+};
+
 let _id = Date.now();
 const uid = () => `r${_id++}`;
 const fmtM = n => "$" + Number(n||0).toLocaleString("es-AR",{minimumFractionDigits:0});
@@ -218,7 +264,8 @@ function App({user}) {
   const [timer,setTimer]=useState({running:false,elapsed:0});
   const timerRef=useRef(null);
   const [ficha,setFicha]=useState(null); // clienta abierta en la ficha (solo pantalla)
-  const [busq,setBusq]=useState({q:"",cat:"todas",rango:"ciclo",desde:"",hasta:"",rev:false,pag:1}); // filtros del buscador (solo pantalla)
+  const [pagoItem,setPagoItem]=useState(null); // ingreso cuyos pagos se están viendo (solo pantalla)
+  const [busq,setBusq]=useState({q:"",cat:"todas",pago:"todos",rango:"ciclo",desde:"",hasta:"",rev:false,pag:1}); // filtros del buscador (solo pantalla)
 
   useEffect(()=>{try{localStorage.setItem("rendix_v5",JSON.stringify(data));}catch{}},[data]);
 
@@ -310,6 +357,12 @@ function App({user}) {
   const iHoy=useMemo(()=>data.ing.filter(i=>i.fecha===todayISO&&i.empId===data.activeEmp),[data]);
   const ingActivo=useMemo(()=>data.ing.filter(i=>i.empId===data.activeEmp),[data.ing,data.activeEmp]);
   const abrirFicha=n=>setFicha(n);
+  const abrirPago=i=>{setPagoItem(i);setModal("pago");};
+  const gastActivo=useMemo(()=>data.gast.filter(g=>g.empId===data.activeEmp),[data.gast,data.activeEmp]);
+  const catsG=useMemo(()=>catsGastoDe(data.catsGasto&&data.catsGasto[data.activeEmp],gastActivo),[data.catsGasto,data.activeEmp,gastActivo]);
+  const agregarCatGasto=n=>{const nombre=String(n||"").trim();if(!nombre) return null;const ya=catsG.find(c=>normBusq(c)===normBusq(nombre));if(ya) return ya;upd(d=>{const id=d.activeEmp;const prev=(d.catsGasto&&typeof d.catsGasto==="object"&&!Array.isArray(d.catsGasto))?d.catsGasto:{};d.catsGasto={...prev,[id]:[...catsG,nombre]};return d;});return nombre;};
+  const deudaAct=useMemo(()=>{let t=0,n=0;ingActivo.forEach(i=>{const e=estadoPago(i);if(e.definido&&e.saldo>0){t+=e.saldo;n++;}});return {t,n};},[ingActivo]);
+  const verDeudas=()=>{setBusq(b=>({...b,q:"",cat:"todas",rango:"todo",pago:"debe",rev:false,pag:1}));setTab("buscar");};
   const abrirEdit=i=>{setEditItem(i);setModal("editIng");};
   const borrarIng=id=>{if(!window.confirm("¿Seguro que querés eliminar este ingreso?"))return;upd(d=>{d.ing=d.ing.filter(i=>i.id!==id);return d;});showToast("Eliminado","warn");};
 
@@ -473,13 +526,13 @@ function App({user}) {
 
     // MAIN CONTENT
     React.createElement("main",{style:{padding:"0 4px"}},
-      tab==="inicio"&&React.createElement(TabInicio,{onCliente:abrirFicha,iHoy,iM,anM,anC,ec,areaD,proj,onAdd:()=>setModal("ing"),onEdit:i=>{setEditItem(i);setModal("editIng");},onDel:id=>{if(!window.confirm("¿Seguro que querés eliminar este ingreso?"))return;upd(d=>{d.ing=d.ing.filter(i=>i.id!==id);return d;});showToast("Eliminado","warn");},notaHoy:data.notas?.[todayISO]||"",onNota:v=>upd(d=>{d.notas={...d.notas,[todayISO]:v};return d;}),C}),
-      tab==="gastos"&&React.createElement(TabGastos,{gM,anM,ec,onAdd:()=>setModal("gast"),onEdit:g=>{setEditItem(g);setModal("editGast");},onDel:id=>{if(!window.confirm("¿Seguro que querés eliminar este gasto?"))return;upd(d=>{d.gast=d.gast.filter(g=>g.id!==id);return d;});showToast("Eliminado","warn");},C}),
-      tab==="cal"&&React.createElement(TabCal,{onCliente:abrirFicha,isDark,iM,cA,ec,onAddForDate:ds=>{setPrefillDate(ds);setModal("ing");},onEdit:i=>{setEditItem(i);setModal("editIng");},onDel:id=>{if(!window.confirm("¿Seguro que querés eliminar este ingreso?"))return;upd(d=>{d.ing=d.ing.filter(i=>i.id!==id);return d;});showToast("Eliminado","warn");},C}),
+      tab==="inicio"&&React.createElement(TabInicio,{onCliente:abrirFicha,onPago:abrirPago,debe:deudaAct,onVerDeudas:verDeudas,iHoy,iM,anM,anC,ec,areaD,proj,onAdd:()=>setModal("ing"),onEdit:i=>{setEditItem(i);setModal("editIng");},onDel:id=>{if(!window.confirm("¿Seguro que querés eliminar este ingreso?"))return;upd(d=>{d.ing=d.ing.filter(i=>i.id!==id);return d;});showToast("Eliminado","warn");},notaHoy:data.notas?.[todayISO]||"",onNota:v=>upd(d=>{d.notas={...d.notas,[todayISO]:v};return d;}),C}),
+      tab==="gastos"&&React.createElement(TabGastos,{onCats:()=>setModal("catsG"),gM,anM,ec,onAdd:()=>setModal("gast"),onEdit:g=>{setEditItem(g);setModal("editGast");},onDel:id=>{if(!window.confirm("¿Seguro que querés eliminar este gasto?"))return;upd(d=>{d.gast=d.gast.filter(g=>g.id!==id);return d;});showToast("Eliminado","warn");},C}),
+      tab==="cal"&&React.createElement(TabCal,{onCliente:abrirFicha,onPago:abrirPago,isDark,iM,cA,ec,onAddForDate:ds=>{setPrefillDate(ds);setModal("ing");},onEdit:i=>{setEditItem(i);setModal("editIng");},onDel:id=>{if(!window.confirm("¿Seguro que querés eliminar este ingreso?"))return;upd(d=>{d.ing=d.ing.filter(i=>i.id!==id);return d;});showToast("Eliminado","warn");},C}),
       tab==="stats"&&React.createElement(TabStats,{anM,anC,iM,cA,ec,meta:emp?.meta||0,proj,cmpOff,onSetCmp:setCmpOff,dc,cC,C,semana:semanaData,isDark}),
       tab==="config"&&React.createElement(TabConfig,{data,upd,ec,showToast,cA,C}),
       tab==="clientes"&&React.createElement(TabClientes,{stats:clientesStats,ec,C,isDark,onFicha:abrirFicha}),
-      tab==="buscar"&&React.createElement(TabBuscar,{ing:ingActivo,cA,ec,C,isDark,busq,setBusq,onEdit:abrirEdit,onDel:borrarIng,onCliente:abrirFicha,upd,showToast}),
+      tab==="buscar"&&React.createElement(TabBuscar,{ing:ingActivo,cA,ec,C,isDark,busq,setBusq,onEdit:abrirEdit,onDel:borrarIng,onCliente:abrirFicha,onPago:abrirPago,upd,showToast}),
       tab==="vs"&&React.createElement(TabVs,{anM,anC,cA,cC,cmpOff,onSetCmp:setCmpOff,dc,ec,C,isDark})
     ),
 
@@ -499,13 +552,15 @@ function App({user}) {
     ),
 
     // FICHA DE CLIENTA (pantalla encima de todo; no se guarda en la nube)
-    ficha&&React.createElement(FichaClienta,{key:"ficha",nombre:ficha,ing:ingActivo,ec,C,isDark,onClose:()=>setFicha(null),onEdit:abrirEdit,onDel:borrarIng}),
+    ficha&&React.createElement(FichaClienta,{key:"ficha",nombre:ficha,ing:ingActivo,ec,C,isDark,onClose:()=>setFicha(null),onEdit:abrirEdit,onDel:borrarIng,onPago:abrirPago}),
 
     // MODALS
     modal==="ing"&&React.createElement(MIng,{prefillDate,onClose:()=>{setModal(null);setPrefillDate(null);},onSave:item=>{upd(d=>{d.ing=[...d.ing,{...item,id:uid(),empId:d.activeEmp}];return d;});setModal(null);setPrefillDate(null);showToast("Ingreso registrado ✓");},timerMins:timer.elapsed>0?Math.round(timer.elapsed/60):0,onTimerUsed:resetT,ec}),
     modal==="editIng"&&editItem&&React.createElement(MIng,{existing:editItem,onClose:()=>{setModal(null);setEditItem(null);},onSave:item=>{upd(d=>{d.ing=d.ing.map(i=>i.id===item.id?item:i);return d;});setModal(null);setEditItem(null);showToast("Editado ✓");},ec}),
-    modal==="gast"&&React.createElement(MGast,{onClose:()=>setModal(null),onSave:item=>{upd(d=>{d.gast=[...d.gast,{...item,id:uid(),empId:d.activeEmp}];return d;});setModal(null);showToast("Gasto registrado ✓");},ec}),
-    modal==="editGast"&&editItem&&React.createElement(MGast,{existing:editItem,onClose:()=>{setModal(null);setEditItem(null);},onSave:item=>{upd(d=>{d.gast=d.gast.map(g=>g.id===item.id?item:g);return d;});setModal(null);setEditItem(null);showToast("Gasto editado ✓");},ec}),
+    modal==="catsG"&&React.createElement(GestorCatsGasto,{lista:catsG,gast:gastActivo,ec,upd,showToast,empNombre:emp?.nombre,onClose:()=>setModal(null)}),
+    modal==="pago"&&pagoItem&&React.createElement(MPago,{item:pagoItem,ec,onClose:()=>{setModal(null);setPagoItem(null);},onSave:pg=>{upd(d=>{d.ing=d.ing.map(i=>i.id===pagoItem.id?conPagos(i,pg):i);return d;});setModal(null);setPagoItem(null);showToast("Pagos guardados ✓");}}),
+    modal==="gast"&&React.createElement(MGast,{cats:catsG,onNuevaCat:agregarCatGasto,onClose:()=>setModal(null),onSave:item=>{upd(d=>{d.gast=[...d.gast,{...item,id:uid(),empId:d.activeEmp}];return d;});setModal(null);showToast("Gasto registrado ✓");},ec}),
+    modal==="editGast"&&editItem&&React.createElement(MGast,{cats:catsG,onNuevaCat:agregarCatGasto,existing:editItem,onClose:()=>{setModal(null);setEditItem(null);},onSave:item=>{upd(d=>{d.gast=d.gast.map(g=>g.id===item.id?item:g);return d;});setModal(null);setEditItem(null);showToast("Gasto editado ✓");},ec}),
     modal==="emp"&&React.createElement(MEmp,{onClose:()=>setModal(null),onSave:e=>{upd(d=>{const ne={...e,id:uid(),meta:0};d.emps=[...d.emps,ne];d.activeEmp=ne.id;return d;});setModal(null);showToast("Creado ✓");},ec}),
 
     toast&&React.createElement("div",{style:{position:"fixed",bottom:90,right:16,padding:"12px 4px",borderRadius:24,background:toast.type==="warn"?"#ef4444":ec,color:toast.type==="warn"?"#fff":"#000",fontWeight:700,fontSize:14,zIndex:300,boxShadow:"0 8px 28px rgba(0,0,0,0.5)"}},toast.msg)
@@ -529,7 +584,7 @@ function Onboard({onDone}) {
 }
 
 // ════════ TAB INICIO ════════
-function TabInicio({iHoy,iM,anM,anC,ec,areaD,proj,onAdd,onEdit,onDel,notaHoy,onNota,C,onCliente}) {
+function TabInicio({iHoy,iM,anM,anC,ec,areaD,proj,onAdd,onEdit,onDel,notaHoy,onNota,C,onCliente,onPago,debe,onVerDeudas}) {
   const [ne,setNe]=useState(false);
   const [nv,setNv]=useState(notaHoy);
   const tH=iHoy.reduce((s,i)=>s+i.monto,0),mH=iHoy.reduce((s,i)=>s+i.duracion,0);
@@ -537,6 +592,9 @@ function TabInicio({iHoy,iM,anM,anC,ec,areaD,proj,onAdd,onEdit,onDel,notaHoy,onN
   const dSegs=anM.sA.slice(0,5).map(([s,info],i)=>({v:info.monto,c:[ec,"#818cf8","#34d399","#f97316","#ec4899"][i]||ec,label:s}));
 
   return React.createElement("div",{style:{display:"flex",flexDirection:"column",gap:8}},
+
+    // PAGOS PENDIENTES
+    debe&&debe.n>0&&React.createElement("button",{onClick:onVerDeudas,style:{textAlign:"left",background:"rgba(249,115,22,0.10)",border:"1px solid rgba(249,115,22,0.35)",borderRadius:14,padding:"11px 8px",color:"#f97316",fontSize:13,fontWeight:700,cursor:"pointer",fontFamily:"inherit"}},`⏳ Te deben ${fmtM(debe.t)} · ${debe.n} ${debe.n===1?"ingreso":"ingresos"} sin cobrar completo · Ver`),
 
     // TODAY CARD
     React.createElement("div",{style:{background:`linear-gradient(135deg,rgba(${hr(ec)},0.16),rgba(${hr(ec)},0.04))`,borderRadius:20,padding:"14px 4px",border:`1px solid rgba(${hr(ec)},0.18)`}},
@@ -553,7 +611,7 @@ function TabInicio({iHoy,iM,anM,anC,ec,areaD,proj,onAdd,onEdit,onDel,notaHoy,onN
       ),
       iHoy.length===0
         ?React.createElement("div",{style:{textAlign:"center",padding:"10px 4px",color:"#1e3a5f",fontSize:13}},"Sin ingresos hoy — tocá ＋ para agregar")
-        :React.createElement("div",{style:{display:"flex",flexDirection:"column",gap:6}},iHoy.sort((a,b)=>b.hora.localeCompare(a.hora)).map(i=>React.createElement(IC,{key:i.id,item:i,ec,onDel,onEdit,onCliente,compact:true})))
+        :React.createElement("div",{style:{display:"flex",flexDirection:"column",gap:6}},iHoy.sort((a,b)=>b.hora.localeCompare(a.hora)).map(i=>React.createElement(IC,{key:i.id,item:i,ec,onDel,onEdit,onCliente,onPago,compact:true})))
     ),
 
     // STATS ROW
@@ -601,14 +659,14 @@ function TabInicio({iHoy,iM,anM,anC,ec,areaD,proj,onAdd,onEdit,onDel,notaHoy,onN
     iM.length>0&&React.createElement("div",null,
       React.createElement("div",{style:{fontSize:11,color:"#334155",fontWeight:700,textTransform:"uppercase",letterSpacing:0.5,marginBottom:10}},`Ingresos del ciclo — ${iM.length} registros`),
       React.createElement("div",{style:{display:"flex",flexDirection:"column",gap:8}},
-        [...iM].sort((a,b)=>b.fecha.localeCompare(a.fecha)||b.hora.localeCompare(a.hora)).map(i=>React.createElement(IC,{key:i.id,item:i,ec,onDel,onEdit,onCliente,showDate:true}))
+        [...iM].sort((a,b)=>b.fecha.localeCompare(a.fecha)||b.hora.localeCompare(a.hora)).map(i=>React.createElement(IC,{key:i.id,item:i,ec,onDel,onEdit,onCliente,onPago,showDate:true}))
       )
     )
   );
 }
 
 // ════════ INGRESO CARD ════════
-function IC({item,ec,onDel,onEdit,showDate,compact,onCliente}) {
+function IC({item,ec,onDel,onEdit,showDate,compact,onCliente,onPago}) {
   const fer=isHol(item.fecha),fin=isWknd(item.fecha);
   return React.createElement("div",{style:{background:compact?"rgba(0,0,0,0.18)":"rgba(255,255,255,0.04)",borderRadius:14,padding:compact?"10px 12px":"13px 14px",display:"flex",alignItems:"center",gap:6,border:"1px solid rgba(255,255,255,0.05)"}},
     React.createElement("div",{style:{width:3,borderRadius:4,alignSelf:"stretch",background:ec,flexShrink:0,minHeight:24}}),
@@ -617,6 +675,7 @@ function IC({item,ec,onDel,onEdit,showDate,compact,onCliente}) {
         React.createElement("div",{style:{minWidth:0}},
           React.createElement("span",{style:{color:"#e2e8f0",fontWeight:700,fontSize:15}},item.servicio||"Trabajo"),
           React.createElement(CatChip,{item,onClick:onEdit}),
+          React.createElement(PagoChip,{item,onClick:onPago||onEdit}),
           item.cliente&&(onCliente
             ?React.createElement("button",{onClick:()=>onCliente(item.cliente),title:"Ver ficha de la clienta",style:{background:"none",border:"none",padding:0,cursor:"pointer",color:"#64748b",fontSize:12,fontFamily:"inherit",textDecoration:"underline",textDecorationColor:"rgba(100,116,139,0.45)"}},` · ${item.cliente}`)
             :React.createElement("span",{style:{color:"#334155",fontSize:12}},` · ${item.cliente}`)),
@@ -639,10 +698,124 @@ function IC({item,ec,onDel,onEdit,showDate,compact,onCliente}) {
   );
 }
 
+// ════════ CATEGORÍAS DE GASTOS (editar) ════════
+// Cada acción se aplica en el momento. Lo que toca gastos ya cargados pide confirmación y dice cuántos son.
+function GestorCatsGasto({lista,gast,ec,upd,showToast,onClose,empNombre}) {
+  const h=React.createElement;
+  const [nuevo,setNuevo]=useState("");
+  const [edit,setEdit]=useState(null);          // {viejo, valor}: la que se está renombrando
+  const [borrando,setBorrando]=useState(null);  // nombre de la que se quiere quitar
+  const cuenta=n=>gast.filter(g=>normBusq(g.categoria||"Otros")===normBusq(n)).length;
+  const existe=n=>lista.find(c=>normBusq(c)===normBusq(n));
+
+  // guarda la lista del perfil y, si hace falta, reasigna gastos: mapa = { nombreNormalizadoViejo: nombreNuevo }
+  const aplicar=(nuevaLista,mapa)=>upd(d=>{
+    const id=d.activeEmp;
+    const prev=(d.catsGasto&&typeof d.catsGasto==="object"&&!Array.isArray(d.catsGasto))?d.catsGasto:{};
+    d.catsGasto={...prev,[id]:nuevaLista};
+    if(mapa){
+      d.gast=d.gast.map(g=>{
+        if(g.empId!==id) return g;
+        const nv=mapa[normBusq(g.categoria||"Otros")];
+        return (nv===undefined||g.categoria===nv)?g:{...g,categoria:nv};
+      });
+    }
+    return d;
+  });
+
+  const agregar=txt=>{
+    const n=String(txt).trim(); if(!n) return false;
+    if(existe(n)){showToast("Esa categoría ya existe","warn");return false;}
+    aplicar([...lista,n]); showToast(`Agregué «${n}» ✓`); return true;
+  };
+  const renombrar=(viejo,txt)=>{
+    const n=String(txt).trim();
+    if(!n||n===viejo){setEdit(null);return;}
+    const ov=normBusq(viejo), cnt=cuenta(viejo), otra=existe(n);
+    if(otra&&normBusq(otra)!==ov){   // el nombre ya existe: se juntan
+      const ok=window.confirm(`Ya existe «${otra}». ¿Juntar «${viejo}» con «${otra}»?${cnt?(cnt===1?`\n\nEl gasto de «${viejo}» pasa a «${otra}».`:`\n\nLos ${cnt} gastos de «${viejo}» pasan a «${otra}».`):""}`);
+      if(!ok) return;
+      aplicar(lista.filter(c=>c!==viejo),{[ov]:otra}); setEdit(null); showToast("Categorías juntadas ✓"); return;
+    }
+    if(cnt>0&&!window.confirm(`Voy a cambiar «${viejo}» por «${n}» también en ${cnt} ${cnt===1?"gasto":"gastos"} que ya cargaste.\n\n¿Confirmás?`)) return;
+    aplicar(lista.map(c=>c===viejo?n:c),{[ov]:n}); setEdit(null); showToast("Nombre cambiado ✓");
+  };
+  const quitar=(nombre,destino)=>{
+    const cnt=cuenta(nombre);
+    if(cnt>0){
+      if(!window.confirm(`Voy a pasar ${cnt} ${cnt===1?"gasto":"gastos"} de «${nombre}» a «${destino}» y quitar «${nombre}».\n\n¿Confirmás?`)) return;
+      aplicar(lista.filter(c=>c!==nombre),{[normBusq(nombre)]:destino});
+    }else{
+      if(!window.confirm(`¿Quitar la categoría «${nombre}»?`)) return;
+      aplicar(lista.filter(c=>c!==nombre));
+    }
+    setBorrando(null); showToast("Categoría quitada ✓");
+  };
+  const mover=(i,d)=>{
+    const j=i+d; if(j<0||j>=lista.length) return;
+    const l=[...lista]; [l[i],l[j]]=[l[j],l[i]]; aplicar(l);
+  };
+
+  const sug=SUGERIDAS_GASTO.filter(x=>!existe(x));
+  const btn={background:"rgba(255,255,255,0.06)",border:"none",color:"#94a3b8",borderRadius:9,width:34,height:34,fontSize:14,cursor:"pointer",fontFamily:"inherit"};
+  const inp={flex:1,minWidth:0,background:"rgba(255,255,255,0.05)",border:"1px solid rgba(255,255,255,0.08)",borderRadius:11,padding:"11px 8px",color:"#e2e8f0",fontSize:15,outline:"none",fontFamily:"inherit"};
+
+  return h("div",{style:{position:"fixed",inset:0,background:"rgba(0,0,0,0.82)",zIndex:200,display:"flex",alignItems:"flex-end",justifyContent:"center"},onClick:e=>{if(e.target===e.currentTarget)onClose();}},
+    h("div",{style:{background:"#0d1626",borderRadius:"24px 24px 0 0",width:"100%",maxWidth:"100%",border:"1px solid rgba(255,255,255,0.07)",borderBottom:"none"}},
+      h("div",{style:{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"14px 8px 10px",borderBottom:"1px solid rgba(255,255,255,0.06)"}},
+        h("div",null,h("div",{style:{fontSize:17,fontWeight:800,color:"#fff"}},"Categorías de gastos"),h("div",{style:{fontSize:11,color:"#64748b"}},empNombre?`Perfil: ${empNombre}`:"")),
+        h("button",{onClick:onClose,"aria-label":"Cerrar",style:{background:"rgba(255,255,255,0.06)",border:"none",color:"#475569",fontSize:16,cursor:"pointer",width:32,height:32,borderRadius:10}},"✕")
+      ),
+      h("div",{style:{padding:"12px 8px",overflowY:"auto",maxHeight:"68vh"}},
+        h("div",{style:{fontSize:11,color:"#64748b",lineHeight:1.5,marginBottom:10}},"Estas categorías son de este perfil. Si cambiás un nombre, se actualizan también los gastos que ya cargaste (antes te pregunto)."),
+        lista.map((c,i)=>{
+          const cnt=cuenta(c);
+          const editando=edit&&edit.viejo===c;
+          return h("div",{key:c,style:{background:"rgba(255,255,255,0.04)",borderRadius:12,padding:"8px",marginBottom:6}},
+            editando
+              ?h("div",{style:{display:"flex",gap:6,alignItems:"center"}},
+                  h("input",{type:"text",value:edit.valor,onChange:e=>setEdit({viejo:c,valor:e.target.value}),onKeyDown:e=>{if(e.key==="Enter"){e.preventDefault();renombrar(c,edit.valor);}},autoFocus:true,"aria-label":"Nuevo nombre",style:inp}),
+                  h("button",{onClick:()=>renombrar(c,edit.valor),style:{...btn,width:"auto",padding:"0 10px",background:ec,color:"#000",fontWeight:700}},"Guardar"),
+                  h("button",{onClick:()=>setEdit(null),style:{...btn,width:"auto",padding:"0 10px"}},"Cancelar"))
+              :h("div",{style:{display:"flex",alignItems:"center",gap:4}},
+                  h("div",{style:{flex:1,minWidth:0}},h("div",{style:{color:"#e2e8f0",fontWeight:700,fontSize:14}},c),h("div",{style:{fontSize:11,color:"#475569"}},`${cnt} ${cnt===1?"gasto":"gastos"}`)),
+                  h("button",{onClick:()=>mover(i,-1),disabled:i===0,"aria-label":"Subir "+c,style:{...btn,opacity:i===0?0.3:1}},"↑"),
+                  h("button",{onClick:()=>mover(i,1),disabled:i===lista.length-1,"aria-label":"Bajar "+c,style:{...btn,opacity:i===lista.length-1?0.3:1}},"↓"),
+                  h("button",{onClick:()=>{setBorrando(null);setEdit({viejo:c,valor:c});},"aria-label":"Cambiar nombre de "+c,style:btn},"✏️"),
+                  h("button",{onClick:()=>setBorrando(borrando===c?null:c),disabled:lista.length<=1,"aria-label":"Quitar "+c,style:{...btn,opacity:lista.length<=1?0.3:1}},"🗑")),
+            borrando===c&&h("div",{style:{marginTop:8,paddingTop:8,borderTop:"1px solid rgba(255,255,255,0.06)"}},
+              cnt>0
+                ?h("div",null,
+                    h("div",{style:{fontSize:12,color:"#f59e0b",marginBottom:6}},`«${c}» tiene ${cnt} ${cnt===1?"gasto":"gastos"}. ¿A qué categoría los paso?`),
+                    h("div",{style:{display:"flex",gap:6,flexWrap:"wrap"}},
+                      lista.filter(x=>x!==c).map(x=>h("button",{key:x,onClick:()=>quitar(c,x),style:{padding:"7px 11px",borderRadius:20,cursor:"pointer",fontSize:12,fontWeight:700,fontFamily:"inherit",background:"rgba(255,255,255,0.06)",color:"#e2e8f0",border:"1px solid rgba(255,255,255,0.1)"}},"→ "+x)),
+                      h("button",{onClick:()=>setBorrando(null),style:{padding:"7px 11px",borderRadius:20,cursor:"pointer",fontSize:12,fontFamily:"inherit",background:"none",color:"#64748b",border:"none"}},"Cancelar")))
+                :h("div",{style:{display:"flex",gap:6,alignItems:"center"}},
+                    h("span",{style:{fontSize:12,color:"#94a3b8",flex:1}},"No tiene gastos."),
+                    h("button",{onClick:()=>quitar(c),style:{...btn,width:"auto",padding:"0 12px",background:"#ef4444",color:"#fff",fontWeight:700}},"Quitar"),
+                    h("button",{onClick:()=>setBorrando(null),style:{...btn,width:"auto",padding:"0 10px"}},"Cancelar")))
+          );
+        }),
+        h("div",{style:{display:"flex",gap:6,marginTop:10}},
+          h("input",{type:"text",value:nuevo,onChange:e=>setNuevo(e.target.value),onKeyDown:e=>{if(e.key==="Enter"){e.preventDefault();if(agregar(nuevo))setNuevo("");}},placeholder:"Nueva categoría (ej: Luz)","aria-label":"Nueva categoría",style:inp}),
+          h("button",{onClick:()=>{if(agregar(nuevo))setNuevo("");},style:{...btn,width:"auto",padding:"0 14px",background:ec,color:"#000",fontWeight:800}},"＋ Agregar")
+        ),
+        sug.length>0&&h("div",{style:{marginTop:12}},
+          h("div",{style:{fontSize:11,color:"#334155",fontWeight:700,textTransform:"uppercase",letterSpacing:0.5,marginBottom:6}},"Sugeridas (tocá para sumar)"),
+          h("div",{style:{display:"flex",gap:6,flexWrap:"wrap"}},sug.map(x=>h("button",{key:x,onClick:()=>agregar(x),style:{padding:"7px 11px",borderRadius:20,cursor:"pointer",fontSize:12,fontWeight:700,fontFamily:"inherit",background:"transparent",color:"#94a3b8",border:"1px dashed rgba(148,163,184,0.5)"}},"＋ "+x)))
+        )
+      ),
+      h("div",{style:{padding:"10px 8px 24px",borderTop:"1px solid rgba(255,255,255,0.06)"}},
+        h("button",{onClick:onClose,style:{width:"100%",padding:"13px",borderRadius:12,background:ec,color:"#000",fontWeight:800,border:"none",cursor:"pointer",fontSize:15,fontFamily:"inherit"}},"Listo")
+      )
+    )
+  );
+}
+
 // ════════ TAB GASTOS ════════
-function TabGastos({gM,anM,ec,onAdd,onEdit,onDel,C}) {
+function TabGastos({gM,anM,ec,onAdd,onEdit,onDel,C,onCats}) {
   const cA=Object.entries(anM.bc||{}).sort((a,b)=>b[1].monto-a[1].monto);
-  const gSegs=cA.slice(0,5).map(([c,info],i)=>({v:info.monto,c:["#ef4444","#f97316","#f59e0b","#818cf8","#ec4899"][i]||"#ef4444",label:c}));
+  const gSegs=cA.map(([c,info],i)=>({v:info.monto,c:PAL_GASTOS[i%PAL_GASTOS.length],label:c}));
   return React.createElement("div",{style:{display:"flex",flexDirection:"column",gap:8}},
     React.createElement("div",{style:{display:"flex",justifyContent:"space-between",alignItems:"center"}},
       React.createElement("div",null,
@@ -653,6 +826,10 @@ function TabGastos({gM,anM,ec,onAdd,onEdit,onDel,C}) {
         React.createElement("div",{style:{fontSize:11,color:"#334155"}},"del ingreso"),
         React.createElement("div",{style:{fontSize:20,fontWeight:700,color:anM.tG/anM.tI>0.5?"#ef4444":"#f59e0b",fontFamily:"monospace"}},`${Math.round((anM.tG/anM.tI)*100)}%`)
       )
+    ),
+    (onAdd||onCats)&&React.createElement("div",{style:{display:"flex",gap:6,justifyContent:"flex-end"}},
+      onAdd&&React.createElement("button",{onClick:onAdd,style:{background:"#ef4444",border:"none",borderRadius:12,padding:"9px 14px",color:"#fff",fontSize:13,fontWeight:800,cursor:"pointer",fontFamily:"inherit"}},"＋ Registrar gasto"),
+      onCats&&React.createElement("button",{onClick:onCats,style:{background:"rgba(255,255,255,0.06)",border:"1px solid rgba(255,255,255,0.08)",borderRadius:12,padding:"9px 12px",color:"#94a3b8",fontSize:12,fontWeight:700,cursor:"pointer",fontFamily:"inherit"}},"⚙️ Editar categorías")
     ),
     gSegs.length>0&&React.createElement("div",{style:{background:C.card,borderRadius:20,padding:"12px",border:C.bdr,display:"flex",gap:8,alignItems:"center"}},
       React.createElement(Donut,{segs:gSegs,size:110,sw:15}),
@@ -688,7 +865,7 @@ function TabGastos({gM,anM,ec,onAdd,onEdit,onDel,C}) {
 }
 
 // ════════ TAB CALENDARIO ════════
-function TabCal({iM,cA,ec,isDark,onAddForDate,onEdit,onDel,C,onCliente}) {
+function TabCal({iM,cA,ec,isDark,onAddForDate,onEdit,onDel,C,onCliente,onPago}) {
   const [sel,setSel]=useState(null);
   const dim=Math.round((cA.fin-cA.ini)/(864e5))+1,fd=cA.ini.getDay();
   const bd={};iM.forEach(i=>{if(!bd[i.fecha])bd[i.fecha]={monto:0,count:0,items:[]};bd[i.fecha].monto+=i.monto;bd[i.fecha].count+=1;bd[i.fecha].items.push(i);});
@@ -724,7 +901,7 @@ function TabCal({iM,cA,ec,isDark,onAddForDate,onEdit,onDel,C,onCliente}) {
         React.createElement("button",{onClick:()=>onAddForDate(sel),style:{background:ec,color:"#000",border:"none",borderRadius:12,padding:"9px 4px",fontWeight:700,cursor:"pointer",fontSize:14,fontFamily:"inherit"}},"＋ Agregar")
       ),
       selD
-        ?React.createElement("div",{style:{display:"flex",flexDirection:"column",gap:8}},selD.items.map(i=>React.createElement(IC,{key:i.id,item:i,ec,onDel,onEdit,onCliente,compact:true})))
+        ?React.createElement("div",{style:{display:"flex",flexDirection:"column",gap:8}},selD.items.map(i=>React.createElement(IC,{key:i.id,item:i,ec,onDel,onEdit,onCliente,onPago,compact:true})))
         :React.createElement("div",{style:{color:"#1e3a5f",fontSize:13,textAlign:"center",padding:"10px 4px"}},"Sin ingresos este día — tocá Agregar")
     )
   );
@@ -961,6 +1138,7 @@ function MIng({onClose,onSave,ec,timerMins,onTimerUsed,existing,prefillDate}) {
         :(sugVieja.dudas&&sugVieja.dudas.length>1?React.createElement("div",{style:{fontSize:11,color:"#f59e0b",marginTop:6}},`Puede ser ${sugVieja.dudas.join(" o ")}: elegí vos.`):null))
     ),
     React.createElement(FI,{l:"Monto ($) *",t:"number",v:f.monto,s:v=>s("monto",v),p:"0"}),
+    React.createElement(PagosEditor,{total:parseFloat(f.monto)||0,pagos:f.pagos,onChange:v=>setF(p=>conPagos(p,v)),fechaDefault:existing?todayISO:(f.fecha||todayISO)}),
     React.createElement("div",{style:{display:"grid",gridTemplateColumns:"1fr 1fr",gap:6}},
       React.createElement(FI,{l:"Duración (min)",t:"number",v:f.duracion,s:v=>s("duracion",v),p:"90"}),
       React.createElement(FI,{l:"Hora",t:"time",v:f.hora,s:v=>s("hora",v)})
@@ -972,12 +1150,22 @@ function MIng({onClose,onSave,ec,timerMins,onTimerUsed,existing,prefillDate}) {
   );
 }
 
-function MGast({onClose,onSave,ec,existing}) {
-  const [f,setF]=useState(existing||{descripcion:"",monto:"",categoria:"Materiales",fecha:todayISO});
+function MGast({onClose,onSave,ec,existing,cats,onNuevaCat}) {
+  const lista=(cats&&cats.length)?cats:GASTO_CATS;
+  const [f,setF]=useState(existing||{descripcion:"",monto:"",categoria:lista[0],fecha:todayISO});
+  const [nuevaAbierta,setNuevaAbierta]=useState(false);
+  const [nuevoTxt,setNuevoTxt]=useState("");
   const s=(k,v)=>setF(p=>({...p,[k]:v}));
+  const crear=()=>{const n=onNuevaCat?onNuevaCat(nuevoTxt):null;if(n){s("categoria",n);setNuevoTxt("");setNuevaAbierta(false);}};
+  const sel=normBusq(f.categoria);
   return React.createElement(Modal,{title:existing?"Editar gasto":"Registrar gasto",onClose,onSave:()=>{if(!f.monto||!f.descripcion)return;onSave({...f,monto:parseFloat(f.monto)||0});},color:"#ef4444",ec},
     React.createElement("div",{style:{display:"flex",gap:6,flexWrap:"wrap",marginBottom:12}},
-      GASTO_CATS.map(c=>React.createElement("button",{key:c,onClick:()=>s("categoria",c),style:{padding:"6px 4px",borderRadius:20,cursor:"pointer",fontSize:12,fontWeight:700,background:f.categoria===c?"#ef4444":"rgba(255,255,255,0.06)",color:f.categoria===c?"#fff":"#475569",border:"none",fontFamily:"inherit"}},c))
+      lista.map(c=>React.createElement("button",{key:c,onClick:()=>s("categoria",c),style:{padding:"6px 4px",borderRadius:20,cursor:"pointer",fontSize:12,fontWeight:700,background:sel===normBusq(c)?"#ef4444":"rgba(255,255,255,0.06)",color:sel===normBusq(c)?"#fff":"#475569",border:"none",fontFamily:"inherit"}},c)),
+      onNuevaCat&&React.createElement("button",{key:"__nueva",type:"button",onClick:()=>setNuevaAbierta(v=>!v),style:{padding:"6px 10px",borderRadius:20,cursor:"pointer",fontSize:12,fontWeight:700,background:"transparent",color:"#94a3b8",border:"1px dashed rgba(148,163,184,0.6)",fontFamily:"inherit"}},"＋ Nueva")
+    ),
+    nuevaAbierta&&React.createElement("div",{style:{display:"flex",gap:6,marginBottom:12}},
+      React.createElement("input",{type:"text",value:nuevoTxt,onChange:e=>setNuevoTxt(e.target.value),onKeyDown:e=>{if(e.key==="Enter"){e.preventDefault();crear();}},placeholder:"Nombre de la categoría (ej: Luz)","aria-label":"Nueva categoría",autoFocus:true,style:{flex:1,minWidth:0,background:"rgba(255,255,255,0.05)",border:"1px solid rgba(255,255,255,0.08)",borderRadius:11,padding:"10px 8px",color:"#e2e8f0",fontSize:14,outline:"none",fontFamily:"inherit"}}),
+      React.createElement("button",{type:"button",onClick:crear,style:{padding:"0 14px",borderRadius:11,border:"none",background:"#ef4444",color:"#fff",fontWeight:800,fontSize:14,cursor:"pointer",fontFamily:"inherit"}},"Agregar")
     ),
     React.createElement(FI,{l:"Descripción *",v:f.descripcion,s:v=>s("descripcion",v),p:"¿En qué gastaste?"}),
     React.createElement(FI,{l:"Monto ($) *",t:"number",v:f.monto,s:v=>s("monto",v),p:"0"}),
@@ -1039,6 +1227,81 @@ function CatChip({item,onClick}) {
   return null;
 }
 
+// ════════ PAGO (distintivo en cada ingreso) ════════
+// 💵 Efectivo · 🏦 Transferencia · ⏳ Debe · ◑ Pagó una parte. Tocarlo abre los pagos del ingreso.
+function PagoChip({item,onClick}) {
+  const h=React.createElement;
+  const e=estadoPago(item);
+  if(!e.definido) return null;
+  let txt,col;
+  if(e.estado==="debe"){txt=`⏳ Debe ${fmtM(e.saldo)}`;col="#f97316";}
+  else if(e.estado==="parcial"){txt=`◑ Pagó ${fmtM(e.pagado)} · debe ${fmtM(e.saldo)}`;col="#f59e0b";}
+  else{
+    if(!e.medios.length) return null;
+    if(e.medios.length===1){const m=medioInfo(e.medios[0]);txt=`${m.ic} ${m.l}`;col=m.c;}
+    else{txt=e.medios.map(k=>medioInfo(k).ic).join("+")+" Mixto";col="#a78bfa";}
+  }
+  return h("button",{onClick:ev=>{ev.stopPropagation();if(onClick)onClick(item);},title:"Tocá para ver o registrar pagos",style:{marginLeft:6,padding:"1px 6px",borderRadius:10,fontSize:10,fontWeight:700,fontFamily:"inherit",whiteSpace:"nowrap",cursor:onClick?"pointer":"default",verticalAlign:"middle",color:col,background:`rgba(${hr(col)},0.12)`,border:`1px solid ${col}55`}},txt);
+}
+
+// ════════ EDITOR DE PAGOS ════════
+// Sirve para el formulario (ingreso nuevo/editado) y para la ventanita de pagos. Controlado: recibe `pagos` y avisa con onChange.
+//   pagos undefined = sin indicar · [] = paga después · [{monto,medio,fecha}] = lo que ya pagó.
+function PagosEditor({total,pagos,onChange,fechaDefault}) {
+  const h=React.createElement;
+  const [monto,setMonto]=useState("");
+  const lista=Array.isArray(pagos)?pagos:null;
+  const est=estadoPago({monto:total,pagos:lista||undefined});
+  const falta=lista?est.saldo:total;           // lo que se puede cobrar todavía
+  const agregar=medio=>{
+    if(!(total>0)||!(falta>0)) return;
+    const m0=parseFloat(monto);
+    const m=Math.min((m0>0)?m0:falta,falta);   // vacío = todo lo que falta; nunca más que lo que falta
+    onChange([...(lista||[]),{monto:m,medio,fecha:fechaDefault}]);
+    setMonto("");
+  };
+  const estado=!lista
+    ?"Sin indicar (se considera cobrado)"
+    :lista.length===0
+      ?(total>0?`⏳ Todavía no pagó nada · debe ${fmtM(total)}`:"Sin pagos")
+      :`Pagó ${fmtM(est.pagado)} de ${fmtM(total)}${est.saldo>0?` · debe ${fmtM(est.saldo)}`:" · ✅ completo"}`;
+  const colEstado=!lista?"#64748b":(est.saldo>0?"#f59e0b":"#22c55e");
+  const btn={flex:1,padding:"11px 4px",borderRadius:12,cursor:"pointer",fontSize:14,fontWeight:700,fontFamily:"inherit",background:"rgba(255,255,255,0.06)",color:"#e2e8f0",border:"1px solid rgba(255,255,255,0.10)"};
+  return h("div",{style:{marginBottom:12}},
+    h("label",{style:{fontSize:11,color:"#334155",fontWeight:700,textTransform:"uppercase",letterSpacing:0.5,display:"block",marginBottom:5}},"Pago"),
+    h("div",{style:{fontSize:12,color:colEstado,fontWeight:700,marginBottom:8}},estado),
+    lista&&lista.length>0&&h("div",{style:{display:"flex",flexDirection:"column",gap:4,marginBottom:8}},
+      lista.map((p,idx)=>h("div",{key:idx,style:{display:"flex",alignItems:"center",justifyContent:"space-between",gap:6,background:"rgba(255,255,255,0.04)",borderRadius:10,padding:"6px 8px"}},
+        h("span",{style:{fontSize:13,color:"#e2e8f0"}},`${medioInfo(p.medio).ic} ${medioInfo(p.medio).l} · ${fmtM(p.monto)}${p.fecha?` · ${fmtDt(p.fecha)}`:""}`),
+        h("button",{type:"button",onClick:()=>onChange(lista.filter((_,j)=>j!==idx)),"aria-label":"Quitar pago",style:{background:"none",border:"none",color:"#64748b",cursor:"pointer",fontSize:15,padding:"2px 6px"}},"✕")
+      ))
+    ),
+    (total>0&&falta>0)&&h("div",null,
+      h("input",{type:"number",inputMode:"decimal",value:monto,onChange:e=>setMonto(e.target.value),placeholder:`Monto (vacío = todo lo que falta: ${fmtM(falta)})`,"aria-label":"Monto del pago",style:{width:"100%",background:"rgba(255,255,255,0.05)",border:"1px solid rgba(255,255,255,0.08)",borderRadius:11,padding:"11px 8px",color:"#e2e8f0",fontSize:14,outline:"none",fontFamily:"inherit"}}),
+      h("div",{style:{display:"flex",gap:6,marginTop:6}},MEDIOS.map(m=>h("button",{key:m.k,type:"button",onClick:()=>agregar(m.k),style:btn},`${m.ic} ${m.l}`)))
+    ),
+    !(total>0)&&h("div",{style:{fontSize:11,color:"#f59e0b"}},"Poné primero el monto para registrar el pago."),
+    h("div",{style:{display:"flex",gap:6,marginTop:6,flexWrap:"wrap",alignItems:"center"}},
+      (!lista||lista.length===0)&&h("button",{type:"button",onClick:()=>onChange([]),style:{padding:"8px 11px",borderRadius:20,cursor:"pointer",fontSize:13,fontWeight:700,fontFamily:"inherit",background:(lista&&lista.length===0)?"#f97316":"rgba(255,255,255,0.06)",color:(lista&&lista.length===0)?"#000":"#475569",border:"none"}},"⏳ Paga después"),
+      lista&&h("button",{type:"button",onClick:()=>onChange(undefined),style:{background:"none",border:"none",color:"#64748b",fontSize:12,textDecoration:"underline",cursor:"pointer",fontFamily:"inherit",padding:"6px 2px"}},"Quitar datos de pago")
+    )
+  );
+}
+
+// ════════ VENTANITA DE PAGOS DE UN INGRESO ════════
+function MPago({item,ec,onClose,onSave}) {
+  const h=React.createElement;
+  const [pagos,setPagos]=useState(item.pagos);
+  const total=Number(item.monto)||0;
+  return h(Modal,{title:"Pagos del ingreso",onClose,onSave:()=>onSave(pagos),color:"#22c55e",ec},
+    h("div",{style:{marginBottom:12}},
+      h("div",{style:{color:"#e2e8f0",fontWeight:700,fontSize:15}},item.servicio||"Trabajo"),
+      h("div",{style:{fontSize:12,color:"#64748b",marginTop:2}},`${fmtDt(item.fecha)}${item.cliente?" · "+item.cliente:""} · Total ${fmtM(total)}`)
+    ),
+    h(PagosEditor,{total,pagos,onChange:setPagos,fechaDefault:todayISO})
+  );
+}
+
 // ════════ BUSCADOR ════════
 function TabBuscar(props) {
   return props.busq.rev
@@ -1046,7 +1309,7 @@ function TabBuscar(props) {
     : React.createElement(BuscarVista,props);
 }
 
-function BuscarVista({ing,cA,ec,C,isDark,busq,setBusq,onEdit,onDel,onCliente}) {
+function BuscarVista({ing,cA,ec,C,isDark,busq,setBusq,onEdit,onDel,onCliente,onPago}) {
   const h=React.createElement;
   const tx=isDark?"#e2e8f0":"#1e293b", sub="#64748b";
   const set=p=>setBusq(b=>({...b,pag:1,...p}));
@@ -1064,26 +1327,37 @@ function BuscarVista({ing,cA,ec,C,isDark,busq,setBusq,onEdit,onDel,onCliente}) {
         const k=catEfectiva(i).k;
         if(busq.cat==="sin"){ if(k) return false; } else if(k!==busq.cat) return false;
       }
+      if(busq.pago!=="todos"){
+        const e=estadoPago(i);
+        if(busq.pago==="debe"){ if(!(e.definido&&e.saldo>0)) return false; }
+        else if(busq.pago==="sin"){ if(e.definido) return false; }
+        else if(!(e.definido&&e.porMedio[busq.pago]>0)) return false;
+      }
       if(pal.length){
         const t=normBusq((i.servicio||"")+" "+(i.cliente||"")+" "+(i.nota||""));
         if(!pal.every(w=>t.includes(w))) return false;
       }
       return true;
     }).sort((a,b)=>(b.fecha||"").localeCompare(a.fecha||"")||(b.hora||"").localeCompare(a.hora||""));
-  },[ing,busq.q,busq.cat,busq.rango,busq.desde,busq.hasta,cA.desde,cA.hasta]);
+  },[ing,busq.q,busq.cat,busq.pago,busq.rango,busq.desde,busq.hasta,cA.desde,cA.hasta]);
 
   const pend=useMemo(()=>ing.filter(i=>!i.categoria&&candidatosCat(i.servicio).length>0).length,[ing]);
+  const deuda=useMemo(()=>{let t=0,c=0;ing.forEach(i=>{const e=estadoPago(i);if(e.definido&&e.saldo>0){t+=e.saldo;c++;}});return {t,c};},[ing]);
 
   const n=res.length;
   const total=res.reduce((s,i)=>s+(Number(i.monto)||0),0);
   const mins=res.reduce((s,i)=>s+(Number(i.duracion)||0),0);
   const prom=n?Math.round(total/n):0;
   const sugeridas=res.filter(i=>!i.categoria&&catEfectiva(i).k).length;
+  let cEf=0,cTr=0,cOtro=0,sinDato=0,porCobrar=0;
+  res.forEach(i=>{const e=estadoPago(i);if(!e.definido){sinDato+=e.total;}else{porCobrar+=e.saldo;Object.entries(e.porMedio).forEach(([k,v])=>{if(k==="efectivo")cEf+=v;else if(k==="transferencia")cTr+=v;else cOtro+=v;});}});
+  const hayPagos=(cEf+cTr+cOtro+porCobrar)>0;
 
   const partes=[];
   if(busq.q.trim()) partes.push(`"${busq.q.trim()}"`);
   partes.push(busq.rango==="ciclo"?`Ciclo ${lblCiclo(cA)}`:busq.rango==="todo"?"Todo el historial":`${busq.desde?fechaLarga(busq.desde):"…"} → ${busq.hasta?fechaLarga(busq.hasta):"…"}`);
   if(busq.cat!=="todas") partes.push(busq.cat==="sin"?"Sin categoría":busq.cat);
+  if(busq.pago!=="todos") partes.push({debe:"Debe",efectivo:"Pagó en efectivo",transferencia:"Pagó por transferencia",sin:"Pago sin indicar"}[busq.pago]);
 
   const inp={width:"100%",background:isDark?"rgba(255,255,255,0.05)":"#ffffff",border:C.bdr,borderRadius:12,padding:"12px 10px",color:tx,fontSize:15,outline:"none",fontFamily:"inherit",colorScheme:isDark?"dark":"light"};
   const seg=(act)=>({flex:1,padding:"9px 4px",borderRadius:10,border:"none",cursor:"pointer",fontSize:13,fontWeight:700,fontFamily:"inherit",background:act?ec:(isDark?"rgba(255,255,255,0.06)":"#eef1f6"),color:act?"#000":sub});
@@ -1113,6 +1387,11 @@ function BuscarVista({ing,cA,ec,C,isDark,busq,setBusq,onEdit,onDel,onCliente}) {
       CATS_ING.map(c=>h("button",{key:c.k,onClick:()=>set({cat:c.k}),style:chip(busq.cat===c.k,c.c)},`${c.ic} ${c.k}`)),
       h("button",{onClick:()=>set({cat:"sin"}),style:chip(busq.cat==="sin","#94a3b8")},"Sin categoría")
     ),
+    // pago: todos / debe / efectivo / transferencia / sin indicar
+    h("div",{style:{display:"flex",gap:6,overflowX:"auto",paddingBottom:2}},
+      [["todos","Todos los pagos","#94a3b8"],["debe","⏳ Debe","#f97316"],["efectivo","💵 Efectivo","#22c55e"],["transferencia","🏦 Transferencia","#38bdf8"],["sin","Sin indicar","#94a3b8"]].map(([k,l,c])=>h("button",{key:k,onClick:()=>set({pago:k}),style:chip(busq.pago===k,c)},l))
+    ),
+    deuda.c>0&&busq.pago!=="debe"&&h("button",{onClick:()=>set({pago:"debe",rango:"todo",cat:"todas",q:""}),style:{textAlign:"left",background:"rgba(249,115,22,0.10)",border:"1px solid rgba(249,115,22,0.35)",borderRadius:12,padding:"10px 10px",color:"#f97316",fontSize:12,fontWeight:700,cursor:"pointer",fontFamily:"inherit"}},`⏳ Te deben ${fmtM(deuda.t)} · ${deuda.c} ${deuda.c===1?"ingreso":"ingresos"} sin cobrar completo · Ver`),
     // aviso de categorías viejas sin confirmar
     pend>0&&h("button",{onClick:()=>set({rev:true}),style:{textAlign:"left",background:"rgba(245,158,11,0.10)",border:"1px dashed #f59e0b",borderRadius:12,padding:"10px 10px",color:"#f59e0b",fontSize:12,fontWeight:700,cursor:"pointer",fontFamily:"inherit"}},`📋 ${pend} ingresos viejos tienen una categoría sugerida sin confirmar · Revisar`),
     // resumen del resultado
@@ -1124,13 +1403,14 @@ function BuscarVista({ing,cA,ec,C,isDark,busq,setBusq,onEdit,onDel,onCliente}) {
         stat("Horas",mins>0?fmtH(mins):"—","#818cf8"),
         stat("Promedio por servicio",n?fmtM(prom):"—","#f59e0b")
       ),
+      hayPagos&&h("div",{style:{fontSize:11,marginTop:8,lineHeight:1.6,color:sub}},"Cobrado: ",`💵 ${fmtM(cEf)} · 🏦 ${fmtM(cTr)}`,cOtro>0?` · otros ${fmtM(cOtro)}`:"",sinDato>0?` · sin indicar ${fmtM(sinDato)}`:"",porCobrar>0&&h("span",{style:{color:"#f97316",fontWeight:700}},` · Por cobrar ${fmtM(porCobrar)}`)),
       busq.cat!=="todas"&&busq.cat!=="sin"&&sugeridas>0&&h("div",{style:{fontSize:11,color:"#f59e0b",marginTop:8}},`Incluye ${sugeridas} con categoría sugerida (todavía sin confirmar).`)
     ),
     // lista
     n===0
       ?h("div",{style:{textAlign:"center",padding:"28px 8px",color:sub,fontSize:14}},"No encontré ingresos con ese filtro.")
       :h("div",{style:{display:"flex",flexDirection:"column",gap:8}},
-        res.slice(0,busq.pag*40).map(i=>h(IC,{key:i.id,item:i,ec,onDel,onEdit,onCliente,showDate:true})),
+        res.slice(0,busq.pag*40).map(i=>h(IC,{key:i.id,item:i,ec,onDel,onEdit,onCliente,onPago,showDate:true})),
         res.length>busq.pag*40&&h("button",{onClick:()=>set({pag:busq.pag+1}),style:{padding:"12px",borderRadius:12,border:C.bdr,background:"transparent",color:sub,fontWeight:700,fontSize:13,cursor:"pointer",fontFamily:"inherit"}},`Ver más (${res.length-busq.pag*40} restantes)`)
       )
   );
@@ -1194,7 +1474,7 @@ function RevisarCats({ing,ec,C,isDark,onBack,upd,showToast,onEdit}) {
 
 // ════════ FICHA DE CLIENTA ════════
 // Pantalla encima de todo (no cambia de pestaña). Junta las visitas aunque el nombre esté escrito distinto en mayúsculas o tildes.
-function FichaClienta({nombre,ing,ec,C,isDark,onClose,onEdit,onDel}) {
+function FichaClienta({nombre,ing,ec,C,isDark,onClose,onEdit,onDel,onPago}) {
   const h=React.createElement;
   const tx=isDark?"#e2e8f0":"#1e293b", sub="#64748b";
   const clave=normBusq(nombre);
@@ -1217,6 +1497,8 @@ function FichaClienta({nombre,ing,ec,C,isDark,onClose,onEdit,onDel}) {
   },[visitas]);
   const variantes=[...new Set(visitas.map(i=>String(i.cliente).trim()))].filter(v=>v!==String(nombre).trim());
   const maxN=svc.length?svc[0].n:1;
+  const deuda=visitas.reduce((s,i)=>s+estadoPago(i).saldo,0);
+  const nDeuda=visitas.filter(i=>estadoPago(i).saldo>0).length;
   const card=(l,v,c,s)=>h("div",{key:l,style:{background:C.card,border:C.bdr,borderRadius:14,padding:"10px 8px",minWidth:0}},
     h("div",{style:{fontSize:10,color:"#334155",textTransform:"uppercase",letterSpacing:0.5,marginBottom:4}},l),
     h("div",{style:{fontFamily:"monospace",fontSize:15,fontWeight:700,color:c}},v),
@@ -1237,6 +1519,7 @@ function FichaClienta({nombre,ing,ec,C,isDark,onClose,onEdit,onDel}) {
           card("Visitas",String(visitas.length),ec),
           card("Última visita",fmtDt(ultima),"#818cf8",hace)
         ),
+        deuda>0&&h("div",{style:{background:"rgba(249,115,22,0.10)",border:"1px solid rgba(249,115,22,0.35)",borderRadius:14,padding:"10px 8px",color:"#f97316",fontSize:13,fontWeight:700}},`⏳ Debe ${fmtM(deuda)} en ${nDeuda} ${nDeuda===1?"visita":"visitas"}. Tocá el distintivo de la visita para registrar el pago.`),
         h("div",{style:{background:C.card,border:C.bdr,borderRadius:16,padding:"12px 8px"}},
           h("div",{style:{fontSize:11,color:"#334155",fontWeight:700,textTransform:"uppercase",letterSpacing:0.5,marginBottom:10}},"Lo que más se hace"),
           svc.slice(0,5).map(s=>h("div",{key:s.nombre,style:{marginBottom:9}},
@@ -1248,7 +1531,7 @@ function FichaClienta({nombre,ing,ec,C,isDark,onClose,onEdit,onDel}) {
         ),
         variantes.length>0&&h("div",{style:{fontSize:11,color:sub,lineHeight:1.5}},`Incluye visitas escritas de otra forma: ${variantes.join(", ")}.`),
         h("div",{style:{fontSize:11,color:"#334155",fontWeight:700,textTransform:"uppercase",letterSpacing:0.5,marginTop:4}},`Todas las visitas (${visitas.length})`),
-        h("div",{style:{display:"flex",flexDirection:"column",gap:8}},visitas.map(i=>h(IC,{key:i.id,item:i,ec,onDel,onEdit,showDate:true})))
+        h("div",{style:{display:"flex",flexDirection:"column",gap:8}},visitas.map(i=>h(IC,{key:i.id,item:i,ec,onDel,onEdit,onPago,showDate:true})))
       )
   );
 }
